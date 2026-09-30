@@ -1,0 +1,873 @@
+{
+  "$defs": {
+    "AgentsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "dirs": {
+          "default": [],
+          "description": "Extra folders to load agent definitions from, one per line.",
+          "items": {
+            "format": "path",
+            "type": "string"
+          },
+          "title": "Dirs",
+          "type": "array"
+        }
+      },
+      "title": "AgentsConfig",
+      "type": "object"
+    },
+    "AudioConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Transcribe recordings with whisper.cpp.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "whisper_cli": {
+          "default": "whisper-cli",
+          "description": "The whisper.cpp program (whisper-cli), or its full path.",
+          "title": "Whisper Cli",
+          "type": "string"
+        },
+        "ffmpeg": {
+          "default": "ffmpeg",
+          "description": "The ffmpeg program, or its full path. Converts recordings for whisper.cpp and takes frames from videos;\nffprobe is expected in the same folder.",
+          "title": "Ffmpeg",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Full path to a whisper model file (ggml-*.bin). Needed for transcription.",
+          "title": "Model"
+        },
+        "language": {
+          "default": "auto",
+          "description": "Spoken language, e.g. en or de; auto detects it.",
+          "title": "Language",
+          "type": "string"
+        },
+        "use_gpu": {
+          "default": false,
+          "description": "Transcribe on the GPU.",
+          "title": "Use Gpu",
+          "type": "boolean"
+        },
+        "threads": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "CPU threads; empty lets whisper.cpp choose.",
+          "title": "Threads"
+        },
+        "timeout_factor": {
+          "default": 3.0,
+          "description": "Give up after this many times the recording's length (at least ten minutes).",
+          "title": "Timeout Factor",
+          "type": "number"
+        },
+        "extra_args": {
+          "default": [],
+          "description": "More whisper-cli arguments, one per line.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Args",
+          "type": "array"
+        }
+      },
+      "title": "AudioConfig",
+      "type": "object"
+    },
+    "BuiltinToolsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "web_fetch": {
+          "$ref": "#/$defs/WebFetchConfig",
+          "default": {
+            "enabled": false,
+            "timeout": 30,
+            "max_content_length": 500000
+          }
+        }
+      },
+      "title": "BuiltinToolsConfig",
+      "type": "object"
+    },
+    "ExternalToolsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "obsidian_cli": {
+          "$ref": "#/$defs/ObsidianCLIConfig",
+          "default": {
+            "path": "obsidian",
+            "enabled": true,
+            "vault": null,
+            "prefer": "auto"
+          }
+        },
+        "tasknotes_cli": {
+          "$ref": "#/$defs/TasknotesCLIConfig",
+          "default": {
+            "path": "obsidian",
+            "enabled": true,
+            "vault": null
+          }
+        },
+        "git": {
+          "$ref": "#/$defs/GitConfig",
+          "default": {
+            "path": "git",
+            "enabled": true
+          }
+        },
+        "shell": {
+          "$ref": "#/$defs/ShellExternalConfig",
+          "default": {
+            "enabled": true,
+            "allowlist": [
+              "curl",
+              "grep",
+              "find",
+              "git",
+              "pandoc"
+            ],
+            "require_confirmation": false
+          }
+        }
+      },
+      "title": "ExternalToolsConfig",
+      "type": "object"
+    },
+    "GitConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "git",
+          "description": "The git program.",
+          "title": "Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Let the agent run git in the vault.",
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "GitConfig",
+      "type": "object"
+    },
+    "JournalConfig": {
+      "additionalProperties": false,
+      "description": "What the agent changed, kept so `/diff` can show a turn and `/undo` can take it back.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Keep what each turn changed, so it can be undone.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "turns": {
+          "default": 20,
+          "description": "How many turns can be undone.",
+          "title": "Turns",
+          "type": "integer"
+        },
+        "max_mb": {
+          "default": 20.0,
+          "description": "How much previous content to keep, in MB, before the oldest turns are dropped.",
+          "title": "Max Mb",
+          "type": "number"
+        }
+      },
+      "title": "JournalConfig",
+      "type": "object"
+    },
+    "LLMConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "default": "openai",
+          "description": "llamacpp for a llama.cpp server; openai for OpenAI or any server that speaks its API.",
+          "title": "Provider",
+          "type": "string"
+        },
+        "provider_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A Python class to build the chat model from instead (module.Class). For custom integrations only.",
+          "title": "Provider Class"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model name. Empty with llamacpp asks the server which model it has loaded.",
+          "title": "Model"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server address, e.g. http://127.0.0.1:8080. Empty uses the provider's own.",
+          "title": "Base Url"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An ${ENV} reference such as ${OPENAI_API_KEY}. Not needed for a local server.",
+          "title": "Api Key"
+        },
+        "temperature": {
+          "default": 0.7,
+          "description": "Randomness of the answers: lower is more predictable.",
+          "title": "Temperature",
+          "type": "number"
+        },
+        "top_p": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sample only from the most likely tokens that together reach this probability.",
+          "title": "Top P"
+        },
+        "top_k": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sample only from this many most likely tokens (llama.cpp and similar servers).",
+          "title": "Top K"
+        },
+        "min_p": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Drop tokens less likely than this fraction of the most likely one (llama.cpp and similar servers).",
+          "title": "Min P"
+        },
+        "presence_penalty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Discourage repeating topics already mentioned.",
+          "title": "Presence Penalty"
+        },
+        "repetition_penalty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Discourage repeating the same tokens (llama.cpp and similar servers).",
+          "title": "Repetition Penalty"
+        },
+        "enable_thinking": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Let a reasoning model think before answering. Empty detects it from a llama.cpp server.",
+          "title": "Enable Thinking"
+        },
+        "thinking_budget": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Not supported by the current providers; setting it logs a warning.",
+          "title": "Thinking Budget"
+        },
+        "sampling_preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A named set of sampling values: thinking-general or thinking-coding.",
+          "title": "Sampling Preset"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Longest answer, in tokens. A thinking model needs room for its thinking too.",
+          "title": "Max Tokens"
+        },
+        "context_window": {
+          "default": 128000,
+          "description": "How many tokens the model can hold. Read from a llama.cpp server when it answers.",
+          "title": "Context Window",
+          "type": "integer"
+        }
+      },
+      "title": "LLMConfig",
+      "type": "object"
+    },
+    "MCPServerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "title": "Transport",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Env",
+          "type": "object"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Headers",
+          "type": "object"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "tools_filter": {
+          "default": [
+            "*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools Filter",
+          "type": "array"
+        }
+      },
+      "required": [
+        "transport"
+      ],
+      "title": "MCPServerConfig",
+      "type": "object"
+    },
+    "MemoryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Keep a profile of you that the agent reads at the start of each conversation.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "profile_path": {
+          "default": ".memory/user-profile.md",
+          "description": "Where in the vault the profile is kept.",
+          "title": "Profile Path",
+          "type": "string"
+        },
+        "auto_reflect_on_session_end": {
+          "default": true,
+          "description": "Update the profile when a terminal session ends. The Obsidian plugin does not do this yet.",
+          "title": "Auto Reflect On Session End",
+          "type": "boolean"
+        },
+        "max_profile_tokens": {
+          "default": 2000,
+          "description": "Longest profile the agent reads, in tokens.",
+          "title": "Max Profile Tokens",
+          "type": "integer"
+        },
+        "inject_into_system_prompt": {
+          "default": true,
+          "description": "Give the profile to the agent. Off keeps it on disk without using it.",
+          "title": "Inject Into System Prompt",
+          "type": "boolean"
+        }
+      },
+      "title": "MemoryConfig",
+      "type": "object"
+    },
+    "ObsidianCLIConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "obsidian",
+          "description": "The Obsidian command-line program.",
+          "title": "Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Let the agent ask the running Obsidian app.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "vault": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Vault name passed to every command, replacing any vault the model names.",
+          "title": "Vault"
+        },
+        "prefer": {
+          "default": "auto",
+          "description": "Where link, tag and search questions are answered: auto asks the running app and falls back to reading\nfiles, native never asks it, obsidian reports an error instead of falling back.",
+          "enum": [
+            "auto",
+            "native",
+            "obsidian"
+          ],
+          "title": "Prefer",
+          "type": "string"
+        }
+      },
+      "title": "ObsidianCLIConfig",
+      "type": "object"
+    },
+    "ShellExternalConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Offer shell tools defined in tool folders.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "allowlist": {
+          "default": [
+            "curl",
+            "grep",
+            "find",
+            "git",
+            "pandoc"
+          ],
+          "description": "Commands a shell tool may run, one per line. Every entry is a program the agent can start.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowlist",
+          "type": "array"
+        },
+        "require_confirmation": {
+          "default": false,
+          "description": "Ask before every shell tool call.",
+          "title": "Require Confirmation",
+          "type": "boolean"
+        }
+      },
+      "title": "ShellExternalConfig",
+      "type": "object"
+    },
+    "TasknotesCLIConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "obsidian",
+          "description": "The Obsidian command-line program.",
+          "title": "Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Let the agent create tasks through the TaskNotes plugin.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "vault": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Vault name passed to every command; the model then no longer chooses one.",
+          "title": "Vault"
+        }
+      },
+      "title": "TasknotesCLIConfig",
+      "type": "object"
+    },
+    "ToolsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "dirs": {
+          "default": [],
+          "description": "Extra folders to load shell tool definitions from, one per line.",
+          "items": {
+            "format": "path",
+            "type": "string"
+          },
+          "title": "Dirs",
+          "type": "array"
+        }
+      },
+      "title": "ToolsConfig",
+      "type": "object"
+    },
+    "UIConfig": {
+      "additionalProperties": false,
+      "description": "How the terminal REPL looks. The Obsidian plugin does not use any of it.",
+      "properties": {
+        "streaming": {
+          "default": true,
+          "description": "Show the answer as it is written.",
+          "title": "Streaming",
+          "type": "boolean"
+        },
+        "show_tool_calls": {
+          "default": true,
+          "description": "Show each tool call as it runs.",
+          "title": "Show Tool Calls",
+          "type": "boolean"
+        },
+        "theme": {
+          "default": "dark",
+          "description": "Colour theme.",
+          "title": "Theme",
+          "type": "string"
+        },
+        "markdown_render": {
+          "default": true,
+          "description": "Render answers as Markdown.",
+          "title": "Markdown Render",
+          "type": "boolean"
+        }
+      },
+      "title": "UIConfig",
+      "type": "object"
+    },
+    "VaultConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "The vault the terminal agent works in. The Obsidian plugin always uses the vault it runs in.",
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        },
+        "default_agent": {
+          "default": "assistant",
+          "description": "The agent used when none is chosen. (`default`, the built-in agent's old name, still works.)",
+          "title": "Default Agent",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "VaultConfig",
+      "type": "object"
+    },
+    "WebFetchConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Let the agent open web pages.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "timeout": {
+          "default": 30,
+          "description": "Seconds to wait for a page.",
+          "title": "Timeout",
+          "type": "integer"
+        },
+        "max_content_length": {
+          "default": 500000,
+          "description": "Largest page to read, in bytes.",
+          "title": "Max Content Length",
+          "type": "integer"
+        }
+      },
+      "title": "WebFetchConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "llm": {
+      "$ref": "#/$defs/LLMConfig",
+      "default": {
+        "provider": "openai",
+        "provider_class": null,
+        "model": null,
+        "base_url": null,
+        "api_key": null,
+        "temperature": 0.7,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "presence_penalty": null,
+        "repetition_penalty": null,
+        "enable_thinking": null,
+        "thinking_budget": null,
+        "sampling_preset": null,
+        "max_tokens": null,
+        "context_window": 128000
+      }
+    },
+    "llm_profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LLMConfig"
+      },
+      "default": {},
+      "description": "Named connections to choose from.",
+      "title": "Llm Profiles",
+      "type": "object"
+    },
+    "default_llm_profile": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "The connection used when none is chosen.",
+      "title": "Default Llm Profile"
+    },
+    "vault": {
+      "$ref": "#/$defs/VaultConfig"
+    },
+    "agents": {
+      "$ref": "#/$defs/AgentsConfig",
+      "default": {
+        "dirs": []
+      }
+    },
+    "tools": {
+      "$ref": "#/$defs/ToolsConfig",
+      "default": {
+        "dirs": []
+      }
+    },
+    "builtin_tools": {
+      "$ref": "#/$defs/BuiltinToolsConfig",
+      "default": {
+        "web_fetch": {
+          "enabled": false,
+          "max_content_length": 500000,
+          "timeout": 30
+        }
+      }
+    },
+    "external_tools": {
+      "$ref": "#/$defs/ExternalToolsConfig",
+      "default": {
+        "obsidian_cli": {
+          "enabled": true,
+          "path": "obsidian",
+          "prefer": "auto",
+          "vault": null
+        },
+        "tasknotes_cli": {
+          "enabled": true,
+          "path": "obsidian",
+          "vault": null
+        },
+        "git": {
+          "enabled": true,
+          "path": "git"
+        },
+        "shell": {
+          "allowlist": [
+            "curl",
+            "grep",
+            "find",
+            "git",
+            "pandoc"
+          ],
+          "enabled": true,
+          "require_confirmation": false
+        }
+      }
+    },
+    "mcp_servers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/MCPServerConfig"
+      },
+      "default": {},
+      "title": "Mcp Servers",
+      "type": "object"
+    },
+    "ui": {
+      "$ref": "#/$defs/UIConfig",
+      "default": {
+        "streaming": true,
+        "show_tool_calls": true,
+        "theme": "dark",
+        "markdown_render": true
+      }
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryConfig",
+      "default": {
+        "enabled": false,
+        "profile_path": ".memory/user-profile.md",
+        "auto_reflect_on_session_end": true,
+        "max_profile_tokens": 2000,
+        "inject_into_system_prompt": true
+      }
+    },
+    "journal": {
+      "$ref": "#/$defs/JournalConfig",
+      "default": {
+        "enabled": true,
+        "turns": 20,
+        "max_mb": 20.0
+      }
+    },
+    "audio": {
+      "$ref": "#/$defs/AudioConfig",
+      "default": {
+        "enabled": false,
+        "whisper_cli": "whisper-cli",
+        "ffmpeg": "ffmpeg",
+        "model": null,
+        "language": "auto",
+        "use_gpu": false,
+        "threads": null,
+        "timeout_factor": 3.0,
+        "extra_args": []
+      }
+    }
+  },
+  "required": [
+    "vault"
+  ],
+  "title": "AppConfig",
+  "type": "object"
+}

@@ -1,0 +1,240 @@
+/* The chat view. Colours come from Obsidian's theme variables so it follows light, dark and custom themes. */
+
+.obsidian-agent-chat { display: flex; flex-direction: column; height: 100%; gap: var(--size-4-2); }
+
+/* The bar wraps: a sidebar can be narrow, and the pickers must not push the controls off the edge. */
+.obsidian-agent-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-2);
+                      padding: var(--size-4-2) 0; }
+.obsidian-agent-picker { flex: 1; min-width: 6em; }
+.obsidian-agent-sessions { flex: 2; min-width: 8em; }
+.obsidian-agent-profiles { flex: 1; min-width: 6em; }
+/* No named connections in the config means nothing to choose between. */
+.obsidian-agent-profiles.is-hidden { display: none; }
+.obsidian-agent-keep { display: flex; align-items: center; gap: var(--size-2-2); white-space: nowrap;
+                       color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.obsidian-agent-keep input { margin: 0; }
+
+.obsidian-agent-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: var(--size-4-3); }
+
+.obsidian-agent-message { border-radius: var(--radius-m); padding: var(--size-4-2) var(--size-4-3); }
+.obsidian-agent-message.mod-user { background: var(--background-modifier-hover); }
+.obsidian-agent-message.mod-system { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 0; }
+.obsidian-agent-message.mod-agent { background: var(--background-primary-alt); }
+
+/* The first start (#110): how to set up a connection, in place of the first message */
+.obsidian-agent-message.obsidian-agent-setup {
+  background: var(--background-secondary);
+  border-radius: var(--radius-m);
+  padding: var(--size-4-3);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+.obsidian-agent-setup-title { font-weight: var(--font-semibold); margin-top: 0; }
+.obsidian-agent-setup-buttons, .obsidian-agent-setup button { margin-right: var(--size-4-2); }
+.obsidian-agent-body > :first-child { margin-top: 0; }
+.obsidian-agent-body > :last-child { margin-bottom: 0; }
+
+.obsidian-agent-thinking summary { color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer; }
+.obsidian-agent-thinking pre { white-space: pre-wrap; color: var(--text-faint); font-size: var(--font-ui-smaller); }
+
+.obsidian-agent-tools { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--size-4-2); }
+.obsidian-agent-tool summary { display: flex; gap: var(--size-4-2); align-items: baseline; cursor: pointer;
+  font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.obsidian-agent-tool-name { font-family: var(--font-monospace); color: var(--text-normal); }
+.obsidian-agent-tool-arg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obsidian-agent-tool.mod-error .obsidian-agent-tool-state { color: var(--text-error); }
+.obsidian-agent-tool-result { white-space: pre-wrap; font-size: var(--font-ui-smaller); max-height: 16em;
+  overflow-y: auto; }
+
+.obsidian-agent-footer { display: flex; align-items: center; gap: var(--size-4-2); margin-top: var(--size-4-2);
+  color: var(--text-faint); font-size: var(--font-ui-smaller); }
+.obsidian-agent-error { color: var(--text-error); }
+.obsidian-agent-note { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
+.obsidian-agent-composer { display: flex; gap: var(--size-4-2); align-items: flex-end; }
+.obsidian-agent-input { flex: 1; resize: vertical; font-family: inherit; }
+
+.obsidian-agent-confirm-summary { font-weight: var(--font-semibold); }
+.obsidian-agent-confirm-detail { white-space: pre-wrap; max-height: 14em; overflow-y: auto;
+  background: var(--background-primary-alt); padding: var(--size-4-2); border-radius: var(--radius-s); }
+.obsidian-agent-confirm-tool { color: var(--text-faint); font-size: var(--font-ui-smaller);
+  font-family: var(--font-monospace); }
+
+/* Taking a turn back: the files it touched, then the diff it wrote. */
+.obsidian-agent-undo-files {
+  margin: 0.4em 0;
+  padding-left: 1.2em;
+  font-size: var(--font-ui-small);
+}
+
+.obsidian-agent-undo-diff {
+  max-height: 16em;
+  overflow: auto;
+  padding: 0.6em;
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  white-space: pre;
+}
+
+.obsidian-agent-undo-note {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-footer-undone {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.obsidian-agent-undo button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.obsidian-agent-undo-warning {
+  color: var(--text-warning);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Settings: one collapsible block per section of config.yaml */
+.obsidian-agent-config-section {
+  border-top: 1px solid var(--background-modifier-border);
+  padding: var(--size-4-2) 0;
+}
+
+.obsidian-agent-config-section > summary {
+  cursor: pointer;
+  font-weight: var(--font-semibold);
+}
+
+.obsidian-agent-config-section .setting-item-description.mod-warning {
+  color: var(--text-error);
+}
+
+/* Settings: tabs across the top, as TaskNotes and others do */
+.obsidian-agent-tabs {
+  display: flex;
+  gap: var(--size-4-1);
+  margin-bottom: var(--size-4-4);
+  padding-bottom: var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.obsidian-agent-tab {
+  flex-shrink: 0;
+}
+
+.obsidian-agent-tab.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.obsidian-agent-pane {
+  display: none;
+}
+
+.obsidian-agent-pane.is-active {
+  display: block;
+}
+
+.obsidian-agent-card-intro {
+  padding: var(--size-4-3) 0 var(--size-4-1);
+}
+
+/* A connection's fields open from its pencil button, so the details' own summary line is not needed */
+.obsidian-agent-connection > summary {
+  display: none;
+}
+
+.obsidian-agent-connection,
+.obsidian-agent-nested {
+  padding-left: var(--size-4-6);
+}
+
+/* Settings: an agent's prompt, full width under the Agent card's settings */
+.obsidian-agent-prompt {
+  width: 100%;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  resize: vertical;
+  margin-top: var(--size-4-2);
+}
+
+.obsidian-agent-prompt-hint {
+  padding-top: var(--size-4-1);
+}
+
+.obsidian-agent-settings .is-hidden {
+  display: none;
+}
+
+.obsidian-agent-settings .setting-item-description.mod-warning {
+  color: var(--text-error);
+}
+
+/* Commands: the request box every agent command opens */
+.obsidian-agent-request-input {
+  width: 100%;
+  resize: vertical;
+  margin-bottom: var(--size-4-2);
+}
+
+/* Agents tab: a tool withheld while the agent has folders set */
+.obsidian-agent-settings .setting-item.is-disabled {
+  opacity: 0.5;
+}
+
+.obsidian-agent-agent-actions {
+  border-top: none;
+}
+
+/* Agents tab: a group's single tools, unfolded under the group's switch */
+.obsidian-agent-tool-list {
+  padding-left: var(--size-4-6);
+}
+
+/* Agents tab: the folded "More" card */
+.obsidian-agent-more > summary {
+  cursor: pointer;
+  font-weight: var(--font-semibold);
+  margin: var(--size-4-2) 0;
+}
+
+/* Features tab: which program a path runs, or that it runs none */
+.obsidian-agent-found {
+  margin-top: var(--size-4-1);
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-found.mod-warning {
+  color: var(--text-warning);
+}
+
+/* MCP servers (#87): the command line a stdio server runs, a test's answer, and the editor's text areas */
+.obsidian-agent-mcp-command {
+  display: block;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-mcp-result {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-mcp-result.mod-warning,
+.obsidian-agent-mcp-problem {
+  color: var(--text-error);
+  white-space: pre-wrap;
+}
+
+.obsidian-agent-mcp-area {
+  width: 100%;
+  min-width: 18em;
+  font-family: var(--font-monospace);
+}

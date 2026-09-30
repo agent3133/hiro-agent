@@ -1,0 +1,635 @@
+[
+  {
+    "name": "read_note",
+    "description": "Read and return the content of a note by its relative path in the vault.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "read_notes",
+    "description": "Read several notes at once. Returns each note's content under a '## <path>' heading.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ]
+    }
+  },
+  {
+    "name": "create_note",
+    "description": "Create a new note at the given path with the provided content.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "title": "Overwrite",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "update_note",
+    "description": "Replace a note's entire content (destructive): anything not included in content is lost. Use edit_note to\nchange a part of the note, or append_to_note to add to its end.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "edit_note",
+    "description": "Replace an exact piece of text inside a note, leaving the rest untouched. old_text must appear\nexactly once unless replace_all is true.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "old_text": {
+          "title": "Old Text",
+          "type": "string"
+        },
+        "new_text": {
+          "title": "New Text",
+          "type": "string"
+        },
+        "replace_all": {
+          "default": false,
+          "title": "Replace All",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ]
+    }
+  },
+  {
+    "name": "append_to_note",
+    "description": "Append text to the end of an existing note.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "delete_note",
+    "description": "Delete a note (destructive). By default it moves to the vault's .trash folder and can be restored;\npermanent=true removes it for good.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "permanent": {
+          "default": false,
+          "title": "Permanent",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "list_notes",
+    "description": "List markdown notes in the vault, optionally recursing into subdirectories. A long list is cut off\nafter *limit* notes and says how many it left out; name a folder to see fewer.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "default": "",
+          "title": "Path",
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "title": "Recursive",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "find_notes",
+    "description": "Find notes by file name or path. Supports * wildcards ('*2026-09*', 'Projects/*'); without a\nwildcard the pattern matches anywhere in the path, case-insensitively.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    }
+  },
+  {
+    "name": "move_note",
+    "description": "Move or rename a note within the vault (destructive). By default every [[wikilink]] pointing at it\nis updated, so links do not break.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "from_path": {
+          "title": "From Path",
+          "type": "string"
+        },
+        "to_path": {
+          "title": "To Path",
+          "type": "string"
+        },
+        "update_links": {
+          "default": true,
+          "title": "Update Links",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from_path",
+        "to_path"
+      ]
+    }
+  },
+  {
+    "name": "search_vault",
+    "description": "Search notes for a case-insensitive substring. Optionally restrict to notes carrying *tag*\n(frontmatter or inline #tag) or living under *folder*; with only a tag or folder, every match is listed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "default": "",
+          "title": "Query",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "tag": {
+          "default": "",
+          "title": "Tag",
+          "type": "string"
+        },
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "list_tags",
+    "description": "List the tags used in the vault with the number of notes carrying each.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "get_backlinks",
+    "description": "Find all notes that link to the given note using [[wikilink]] syntax.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "get_outlinks",
+    "description": "Extract all [[wikilink]] outgoing links from a note.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "list_tasks",
+    "description": "List checkbox tasks (`- [ ] …`) written inside notes. status is todo, done or all; path narrows it to\none note or folder. Returns 'note:line: - [ ] text' lines. TaskNotes task notes are separate files —\nuse list_tasknotes for those.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "default": "todo",
+          "title": "Status",
+          "type": "string"
+        },
+        "path": {
+          "default": "",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "daily_note",
+    "description": "The path of the daily note for a date (today when empty), as Obsidian is configured to name and file\nit. Read it with read_note; it does not have to exist yet.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "default": "",
+          "title": "Date",
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "note_outline",
+    "description": "The headings of a note as an indented tree — a cheap way to see how a long note is built before\nreading or editing it.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "find_broken_links",
+    "description": "Links pointing at notes that do not exist, as 'note -> missing target' lines. Use it to clean up a\nvault after moving or deleting notes.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "create_from_template",
+    "description": "Create a note from one of the vault's templates, with the template's variables (date, title, …)\nfilled in by Obsidian. Use list_templates to see what exists.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "title": "Template",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template",
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "list_templates",
+    "description": "The templates configured in this vault, one name per line.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "open_in_obsidian",
+    "description": "Show a note to the user in Obsidian — use it after changing something they will want to look at.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "list_tasknotes",
+    "description": "List TaskNotes tasks — notes with task frontmatter, one file per task — with status, dates and\nproject. status is open (the default), done or all; project narrows it to one project, and\nproject=\"none\" lists the tasks that belong to no project at all. The answer says how many tasks the\nfilters left out and caps a long list, so it is never mistaken for everything there is. Checkbox tasks\nwritten inside notes are a different thing: use list_tasks.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "default": "open",
+          "title": "Status",
+          "type": "string"
+        },
+        "project": {
+          "default": "",
+          "title": "Project",
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "create_tasknote",
+    "description": "Create a TaskNotes task. scheduled is the day the work is planned for (\"scheduled for\", \"on\",\n\"tomorrow\"); due is the deadline (\"due\", \"by\", \"deadline\") — set only what was asked for. Dates are\nYYYY-MM-DD (or YYYY-MM-DDTHH:MM); projects, contexts and tags are comma separated; estimate is in minutes;\nrecurrence is an RRULE. The plugin files the note where this vault keeps tasks and fills in the defaults,\nso do not write task notes by hand.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "due": {
+          "default": "",
+          "title": "Due",
+          "type": "string"
+        },
+        "scheduled": {
+          "default": "",
+          "title": "Scheduled",
+          "type": "string"
+        },
+        "priority": {
+          "default": "",
+          "title": "Priority",
+          "type": "string"
+        },
+        "status": {
+          "default": "",
+          "title": "Status",
+          "type": "string"
+        },
+        "projects": {
+          "default": "",
+          "title": "Projects",
+          "type": "string"
+        },
+        "contexts": {
+          "default": "",
+          "title": "Contexts",
+          "type": "string"
+        },
+        "tags": {
+          "default": "",
+          "title": "Tags",
+          "type": "string"
+        },
+        "estimate": {
+          "default": 0,
+          "title": "Estimate",
+          "type": "integer"
+        },
+        "details": {
+          "default": "",
+          "title": "Details",
+          "type": "string"
+        },
+        "recurrence": {
+          "default": "",
+          "title": "Recurrence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    }
+  },
+  {
+    "name": "complete_tasknote",
+    "description": "Mark a TaskNotes task as done: sets the vault's completed status and today's completion date. A task\nthat recurs is not completed here — advancing its schedule is the plugin's job.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "title": "Task",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  },
+  {
+    "name": "get_metadata",
+    "description": "Load and return YAML frontmatter metadata from a note as JSON.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "update_metadata",
+    "description": "Set or update a single frontmatter property of a note. The value **replaces** the old one, so to add\nto a list pass the whole list — read the note first and write '[\"task\", \"office\"]', not '[\"office\"]',\nor the tag that was there is gone. Types are read from the value: 'true' and 'false' become checkboxes,\nnumbers become numbers, a list becomes a list whether it is written as JSON or the way frontmatter writes\nit ('[task, office]'), and anything else, including a bare [[wikilink]], is text. Quote a value (\"true\")\nto store it as text. The result says what was stored.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "key",
+        "value"
+      ]
+    }
+  },
+  {
+    "name": "read_attachment",
+    "description": "Read an attachment file from the vault. PDF files are rendered page-by-page as images, image\nfiles (png, jpg, jpeg, gif, webp, bmp, tiff) are returned as images, video files (mp4, webm, avi,\nmov, mkv) are sampled as frames via ffmpeg plus a transcript of their audio track, and audio\nrecordings (m4a, mp3, wav, ogg, opus, flac, aac, audio-only webm) are transcribed to timestamped\ntext. Transcripts are saved below the recording's embed and reused on later calls. You may pass a bare filename (e.g. 'photo.jpg') and\nthe tool will locate the file anywhere in the vault automatically.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "update_user_memory",
+    "description": "Update a section of the persistent user profile with new information you've learned about the user. Use this when you discover facts worth remembering across sessions: preferences, identity, projects, communication style, or specific facts.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "section": {
+          "description": "The profile section to update. One of: 'Identity', 'Preferences', 'Projects & Context', 'Communication Style', 'Learned Facts'.",
+          "title": "Section",
+          "type": "string"
+        },
+        "content": {
+          "description": "The new content for this section. Will replace the existing section content.",
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "read_user_memory",
+    "description": "Read the full persistent user profile — what you know about the user so far.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "web_fetch",
+    "description": "Fetch the text content of a URL. Returns the page content as plain text or markdown.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "format": {
+          "default": "auto",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  }
+]

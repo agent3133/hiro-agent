@@ -1,0 +1,31 @@
+# The build and the tests on the three desktop systems Obsidian runs on. The UI is tested by hand, in Obsidian.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Obsidian's own Node (Electron) is 24
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: The bundled packages' notices are up to date
+        run: npm run check-notices
+      - run: npm run build
+      - run: npm test

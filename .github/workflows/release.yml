@@ -1,0 +1,46 @@
+# A tag x.y.z builds the release from the source at that tag and publishes main.js, manifest.json and styles.css —
+# what Obsidian downloads. The tag's message is the release notes.
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: The tag is the manifest's version
+        run: |
+          version=$(node -p "require('./manifest.json').version")
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME, manifest.json says $version"
+            exit 1
+          fi
+          node -e "const v = require('./versions.json'); if (!v['$version']) { console.log('versions.json has no $version'); process.exit(1) }"
+      - run: npm ci
+      - run: npm run check-notices
+      - run: npm run build
+      - run: npm test
+      - name: Provenance for main.js
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: main.js
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

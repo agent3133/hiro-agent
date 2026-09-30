@@ -1,0 +1,144 @@
+/**
+ * Vault-relative paths, and the rules about which ones a tool may touch — a port of the helpers in
+ * src/obsidian_agent/tools/builtin/__init__.py (`note_file`, `check_note_name`, `safe_resolve`).
+ *
+ * Everything here works on vault-relative POSIX paths ("Projects/Atlas.md"), never on the file system, so the same
+ * rules hold for the Node vault and for Obsidian's.
+ */
+
+/** Obsidian's own configuration. No tool reaches it. */
+export const OBSIDIAN_DIR = ".obsidian";
+
+/** What an agent may do is decided in these; the model's tools may not write there (#60). */
+export const DEFINITION_DIRS: Record<string, string> = { ".agents": "agent definitions", ".tools": "tool definitions" };
+
+const INVALID_NAME_CHARS = new Set(['<', '>', ':', '"', '|', '?', '*']);
+const RESERVED_NAMES = new Set(["CON", "PRN", "AUX", "NUL",
+  ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`), ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`)]);
+
+/** A tool refused a path; its message is what the model is told, after "Error: ". */
+export class PathError extends Error {}
+
+/** The note's file name, with `.md` added when it is missing. */
+export function noteFile(path: string): string {
+  const cleaned = path.trim();
+  if (!cleaned || cleaned.toLowerCase().endsWith(".md")) return cleaned;
+  return `${cleaned}.md`;
+}
+
+/** Why *relativePath* cannot be a note file name (Windows' rules), or null if it can. */
+export function checkNoteName(relativePath: string): string | null {
+  for (const part of relativePath.replace(/\\/g, "/").split("/")) {
+    if (!part || part === "." || part === "..") continue;
+    const bad = [...new Set([...part].filter((c) => INVALID_NAME_CHARS.has(c) || c.charCodeAt(0) < 32))].sort();
+    if (bad.length) {
+      const shown = bad.map((c) => (c.charCodeAt(0) >= 32 ? pyRepr(c) : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`))
+        .join(" ");
+      return `${shown} not allowed in file or folder names ('${part}'); e.g. write times as 1100 or 11-00`;
+    }
+    if (part.endsWith(" ") || part.endsWith(".")) {
+      return `file or folder names cannot end with a space or dot ('${part}')`;
+    }
+    if (RESERVED_NAMES.has(part.split(".")[0].toUpperCase())) {
+      return `'${part.split(".")[0]}' is a reserved name on Windows`;
+    }
+  }
+  return null;
+}
+
+/** Python's repr() of a one-character string, as the Python error messages show it. */
+function pyRepr(c: string): string {
+  return c === "'" ? `"'"` : `'${c}'`;
+}
+
+/** An agent's folders as the model is told them: `'Journal/Daily/'`, joined. */
+function scopeFolders(scope: string[]): string {
+  return scope.map((s) => `'${s.replace(/\/+$/, "")}/'`).join(", ");
+}
+
+/**
+ * What a search that found nothing adds for a restricted agent: that only its folders were searched, so the note
+ * the user means may well exist outside them. Without it the model tells the user the note does not exist.
+ * Empty for an agent without a restriction.
+ */
+export function scopeHint(scope: string[] | null): string {
+  if (!scope || !scope.length) return "";
+  return ` (only ${scopeFolders(scope)} searched: this agent is restricted to those folders, so a note elsewhere `
+    + "in the vault cannot be found or read by it — tell the user so rather than that the note does not exist)";
+}
+
+/** The system prompt's paragraph for a restricted agent; empty for one without a restriction. */
+export function scopePrompt(scope: string[] | null): string {
+  if (!scope || !scope.length) return "";
+  return `\n\n---\nYou can only reach notes in ${scopeFolders(scope)}: the user restricted you to these folders. `
+    + "Notes elsewhere in the vault exist, but your tools cannot find, read or change them. When the user asks "
+    + "about a note you cannot find or open, say that it may lie outside the folders you are allowed to use, "
+    + "and that another agent without this restriction can reach it. Never say such a note does not exist. "
+    + "For the same reason you have no tools that could reach past these folders — MCP servers' tools, creating "
+    + "TaskNotes: when the user asks for one, say that the folder restriction withholds it, and that it comes "
+    + "back when the restriction is lifted.\n---";
+}
+
+/**
+ * The vault-relative path *relativePath* stands for, or a PathError — the same refusals, with the same words, as
+ * Python's `safe_resolve`: leaving the vault, Obsidian's own folder, the definition folders, and the scope.
+ */
+export function safeResolve(relativePath: string, scope: string[] | null = null): string {
+  const resolved = normalize(relativePath);
+  if (resolved === null) throw new PathError(`Path escape attempt blocked: '${relativePath}'`);
+  if (within(resolved, OBSIDIAN_DIR)) {
+    throw new PathError(`'${OBSIDIAN_DIR}' holds Obsidian's own configuration and is not writable by tools`);
+  }
+  for (const [folder, holds] of Object.entries(DEFINITION_DIRS)) {
+    if (within(resolved, folder)) throw new PathError(`'${folder}' holds ${holds} and is not writable by tools`);
+  }
+  if (scope && scope.length) {
+    const allowed = scope.map((s) => normalize(s.replace(/\/+$/, "")) ?? "");
+    if (!allowed.some((d) => resolved === d || resolved.startsWith(`${d}/`) || d === "")) {
+      const shown = scope.map((s) => `'${s}'`).join(", ");
+      throw new PathError(`Path '${relativePath}' is outside this agent's allowed scope (${shown})`);
+    }
+  }
+  return resolved;
+}
+
+/** "a/./b/../c" → "a/c"; "" for the vault root; null when it leaves the vault or is absolute. */
+export function normalize(path: string): string | null {
+  const raw = path.replace(/\\/g, "/");
+  if (raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return null;
+  const parts: string[] = [];
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  return parts.join("/");
+}
+
+/** Whether *path* is *folder* or inside it. */
+export function within(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`);
+}
+
+/** The last path segment without `.md` — Python's `Path.stem` for a note. */
+export function stem(path: string): string {
+  const name = basename(path);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+export function basename(path: string): string {
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] ?? "";
+}
+
+/** Whether the last segment has an extension — Python's `Path.suffix` being non-empty. */
+export function hasSuffix(path: string): boolean {
+  const name = basename(path);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && dot < name.length - 1;
+}
