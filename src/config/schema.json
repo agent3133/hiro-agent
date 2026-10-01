@@ -1,22 +1,5 @@
 {
   "$defs": {
-    "AgentsConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "dirs": {
-          "default": [],
-          "description": "Extra folders to load agent definitions from, one per line.",
-          "items": {
-            "format": "path",
-            "type": "string"
-          },
-          "title": "Dirs",
-          "type": "array"
-        }
-      },
-      "title": "AgentsConfig",
-      "type": "object"
-    },
     "AudioConfig": {
       "additionalProperties": false,
       "properties": {
@@ -110,89 +93,25 @@
       "title": "BuiltinToolsConfig",
       "type": "object"
     },
-    "ExternalToolsConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "obsidian_cli": {
-          "$ref": "#/$defs/ObsidianCLIConfig",
-          "default": {
-            "path": "obsidian",
-            "enabled": true,
-            "vault": null,
-            "prefer": "auto"
-          }
-        },
-        "tasknotes_cli": {
-          "$ref": "#/$defs/TasknotesCLIConfig",
-          "default": {
-            "path": "obsidian",
-            "enabled": true,
-            "vault": null
-          }
-        },
-        "git": {
-          "$ref": "#/$defs/GitConfig",
-          "default": {
-            "path": "git",
-            "enabled": true
-          }
-        },
-        "shell": {
-          "$ref": "#/$defs/ShellExternalConfig",
-          "default": {
-            "enabled": true,
-            "allowlist": [
-              "curl",
-              "grep",
-              "find",
-              "git",
-              "pandoc"
-            ],
-            "require_confirmation": false
-          }
-        }
-      },
-      "title": "ExternalToolsConfig",
-      "type": "object"
-    },
-    "GitConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "git",
-          "description": "The git program.",
-          "title": "Path",
-          "type": "string"
-        },
-        "enabled": {
-          "default": true,
-          "description": "Let the agent run git in the vault.",
-          "title": "Enabled",
-          "type": "boolean"
-        }
-      },
-      "title": "GitConfig",
-      "type": "object"
-    },
     "JournalConfig": {
       "additionalProperties": false,
-      "description": "What the agent changed, kept so `/diff` can show a turn and `/undo` can take it back.",
+      "description": "What the agent changed, kept so it can be shown and undone from the chat.",
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Keep what each turn changed, so it can be undone.",
+          "description": "Keep what each answer changed, so it can be undone.",
           "title": "Enabled",
           "type": "boolean"
         },
         "turns": {
           "default": 20,
-          "description": "How many turns can be undone.",
+          "description": "How many of the latest answers can be undone.",
           "title": "Turns",
           "type": "integer"
         },
         "max_mb": {
           "default": 20.0,
-          "description": "How much previous content to keep, in MB, before the oldest turns are dropped.",
+          "description": "How much earlier content to keep, in MB, before the oldest answers can no longer be undone.",
           "title": "Max Mb",
           "type": "number"
         }
@@ -205,22 +124,9 @@
       "properties": {
         "provider": {
           "default": "openai",
-          "description": "llamacpp for a llama.cpp server; openai for OpenAI or any server that speaks its API.",
+          "description": "Written by versions before 0.9.1 and no longer needed: the kind of server is found out from the address. llamacpp only means there is no default address.",
           "title": "Provider",
           "type": "string"
-        },
-        "provider_class": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "A Python class to build the chat model from instead (module.Class). For custom integrations only.",
-          "title": "Provider Class"
         },
         "model": {
           "anyOf": [
@@ -258,7 +164,7 @@
             }
           ],
           "default": null,
-          "description": "An ${ENV} reference such as ${OPENAI_API_KEY}. Not needed for a local server.",
+          "description": "The name of a keychain entry, as ${openai-api-key} (Settings → Keychain). Not needed for a local server.",
           "title": "Api Key"
         },
         "temperature": {
@@ -345,30 +251,23 @@
           "description": "Let a reasoning model think before answering. Empty detects it from a llama.cpp server.",
           "title": "Enable Thinking"
         },
-        "thinking_budget": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Not supported by the current providers; setting it logs a warning.",
-          "title": "Thinking Budget"
-        },
         "sampling_preset": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "thinking-general",
+                "thinking-coding",
+                "instruct-general",
+                "instruct-reasoning"
+              ]
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "A named set of sampling values: thinking-general or thinking-coding.",
+          "description": "A named set of sampling values for the model: thinking-general, thinking-coding, instruct-general or instruct-reasoning. A value set above wins over the preset's.",
           "title": "Sampling Preset"
         },
         "max_tokens": {
@@ -486,12 +385,6 @@
           "title": "Profile Path",
           "type": "string"
         },
-        "auto_reflect_on_session_end": {
-          "default": true,
-          "description": "Update the profile when a terminal session ends. The Obsidian plugin does not do this yet.",
-          "title": "Auto Reflect On Session End",
-          "type": "boolean"
-        },
         "max_profile_tokens": {
           "default": 2000,
           "description": "Longest profile the agent reads, in tokens.",
@@ -506,164 +399,6 @@
         }
       },
       "title": "MemoryConfig",
-      "type": "object"
-    },
-    "ObsidianCLIConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "obsidian",
-          "description": "The Obsidian command-line program.",
-          "title": "Path",
-          "type": "string"
-        },
-        "enabled": {
-          "default": true,
-          "description": "Let the agent ask the running Obsidian app.",
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Vault name passed to every command, replacing any vault the model names.",
-          "title": "Vault"
-        },
-        "prefer": {
-          "default": "auto",
-          "description": "Where link, tag and search questions are answered: auto asks the running app and falls back to reading\nfiles, native never asks it, obsidian reports an error instead of falling back.",
-          "enum": [
-            "auto",
-            "native",
-            "obsidian"
-          ],
-          "title": "Prefer",
-          "type": "string"
-        }
-      },
-      "title": "ObsidianCLIConfig",
-      "type": "object"
-    },
-    "ShellExternalConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "default": true,
-          "description": "Offer shell tools defined in tool folders.",
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "allowlist": {
-          "default": [
-            "curl",
-            "grep",
-            "find",
-            "git",
-            "pandoc"
-          ],
-          "description": "Commands a shell tool may run, one per line. Every entry is a program the agent can start.",
-          "items": {
-            "type": "string"
-          },
-          "title": "Allowlist",
-          "type": "array"
-        },
-        "require_confirmation": {
-          "default": false,
-          "description": "Ask before every shell tool call.",
-          "title": "Require Confirmation",
-          "type": "boolean"
-        }
-      },
-      "title": "ShellExternalConfig",
-      "type": "object"
-    },
-    "TasknotesCLIConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "obsidian",
-          "description": "The Obsidian command-line program.",
-          "title": "Path",
-          "type": "string"
-        },
-        "enabled": {
-          "default": true,
-          "description": "Let the agent create tasks through the TaskNotes plugin.",
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Vault name passed to every command; the model then no longer chooses one.",
-          "title": "Vault"
-        }
-      },
-      "title": "TasknotesCLIConfig",
-      "type": "object"
-    },
-    "ToolsConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "dirs": {
-          "default": [],
-          "description": "Extra folders to load shell tool definitions from, one per line.",
-          "items": {
-            "format": "path",
-            "type": "string"
-          },
-          "title": "Dirs",
-          "type": "array"
-        }
-      },
-      "title": "ToolsConfig",
-      "type": "object"
-    },
-    "UIConfig": {
-      "additionalProperties": false,
-      "description": "How the terminal REPL looks. The Obsidian plugin does not use any of it.",
-      "properties": {
-        "streaming": {
-          "default": true,
-          "description": "Show the answer as it is written.",
-          "title": "Streaming",
-          "type": "boolean"
-        },
-        "show_tool_calls": {
-          "default": true,
-          "description": "Show each tool call as it runs.",
-          "title": "Show Tool Calls",
-          "type": "boolean"
-        },
-        "theme": {
-          "default": "dark",
-          "description": "Colour theme.",
-          "title": "Theme",
-          "type": "string"
-        },
-        "markdown_render": {
-          "default": true,
-          "description": "Render answers as Markdown.",
-          "title": "Markdown Render",
-          "type": "boolean"
-        }
-      },
-      "title": "UIConfig",
       "type": "object"
     },
     "VaultConfig": {
@@ -762,18 +497,6 @@
     "vault": {
       "$ref": "#/$defs/VaultConfig"
     },
-    "agents": {
-      "$ref": "#/$defs/AgentsConfig",
-      "default": {
-        "dirs": []
-      }
-    },
-    "tools": {
-      "$ref": "#/$defs/ToolsConfig",
-      "default": {
-        "dirs": []
-      }
-    },
     "builtin_tools": {
       "$ref": "#/$defs/BuiltinToolsConfig",
       "default": {
@@ -784,37 +507,6 @@
         }
       }
     },
-    "external_tools": {
-      "$ref": "#/$defs/ExternalToolsConfig",
-      "default": {
-        "obsidian_cli": {
-          "enabled": true,
-          "path": "obsidian",
-          "prefer": "auto",
-          "vault": null
-        },
-        "tasknotes_cli": {
-          "enabled": true,
-          "path": "obsidian",
-          "vault": null
-        },
-        "git": {
-          "enabled": true,
-          "path": "git"
-        },
-        "shell": {
-          "allowlist": [
-            "curl",
-            "grep",
-            "find",
-            "git",
-            "pandoc"
-          ],
-          "enabled": true,
-          "require_confirmation": false
-        }
-      }
-    },
     "mcp_servers": {
       "additionalProperties": {
         "$ref": "#/$defs/MCPServerConfig"
@@ -822,15 +514,6 @@
       "default": {},
       "title": "Mcp Servers",
       "type": "object"
-    },
-    "ui": {
-      "$ref": "#/$defs/UIConfig",
-      "default": {
-        "streaming": true,
-        "show_tool_calls": true,
-        "theme": "dark",
-        "markdown_render": true
-      }
     },
     "memory": {
       "$ref": "#/$defs/MemoryConfig",

@@ -12,6 +12,7 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 
 import type { TurnChanges } from "../api/types";
+import { messageOf } from "../core/errors";
 import type { InProcessAgent } from "../inprocess/InProcessAgent";
 
 export class UndoModal extends Modal {
@@ -27,7 +28,7 @@ export class UndoModal extends Modal {
   override onOpen(): void {
     const { contentEl } = this;
     contentEl.addClass("obsidian-agent-undo");
-    this.setTitle("Take this turn back?");
+    this.setTitle("Undo what this answer changed?");
 
     const list = contentEl.createEl("ul", { cls: "obsidian-agent-undo-files" });
     for (const file of this.changed.files) list.createEl("li", { text: file });
@@ -59,7 +60,7 @@ export class UndoModal extends Modal {
     try {
       answer = await this.client.turnDiff(this.changed.turn);
     } catch (error) {
-      diff.setText(`The diff could not be read: ${(error as Error).message}`);
+      diff.setText(`The diff could not be read: ${messageOf(error)}`);
       return;
     }
     diff.setText(answer.diff || "(nothing textual changed)");
@@ -88,7 +89,7 @@ export class UndoModal extends Modal {
       if (result.restored.length) this.onUndone();
       this.close();
     } catch (error) {
-      new Notice(`Nothing was taken back: ${(error as Error).message}`, 10_000);
+      new Notice(`Nothing was taken back: ${messageOf(error)}`, 10_000);
       this.busy = false;
       button.removeAttribute("disabled");
     }

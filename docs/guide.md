@@ -9,6 +9,13 @@ Shift+Enter starts a line, Escape stops a running turn. A typed message tells th
 what is selected in it. A destructive tool — `update_note`, `delete_note`, `move_note` — opens a dialog naming
 the note it will touch; dismissing it means no.
 
+To give the agent something that is not in the vault yet — a photo, a scanned PDF, a voice memo, a short video —
+drop the files onto the chat, or press **+** above *Send*. They show above the input until you send, and you can
+take one out again with its ✕. Sending saves them in the vault, where Obsidian puts new attachments (Settings →
+Files and links → Default location for new attachments), and the message embeds them, so a kept conversation's
+note shows them too. The agent reads them with `read_attachment`: images as images, PDFs page by page, recordings
+and videos transcribed on your computer. Images may be up to 20 MB, PDFs 50 MB, recordings and videos 100 MB.
+
 A turn that changed files gets an undo button in its footer. It shows the diff first and restores only files
 that still hold what the agent wrote, so anything you edited since is named and left alone. The journal holds
 the last 20 turns while Obsidian runs, so reloading the plugin clears it. It records what the agent's tools
@@ -37,12 +44,44 @@ and leaves the note where it is.
 The trash icon deletes the open conversation's note. It asks first, there is no undo, and notes the agent
 changed are not touched — only the transcript goes.
 
-A long conversation is summarised rather than allowed to overflow the model's context: past 50 exchanges the
-oldest are replaced by a summary in the note, and the chat says how many went. The agent's memory of those
-exchanges is the summary from then on.
+One answer can read a lot — every note in a folder, say — and all of it goes along with each further step of that
+answer. So before each step the plugin checks the size of what it is about to send:
 
-The agent answers through whatever endpoint the default connection (Settings → General) points at, so start
-your `llama-server` first — without one a turn ends with a message saying the server does not answer.
+- When less than 2,048 tokens of the model's window would be left for the answer — or 15 % of a larger window: at
+  8k that is past 75 %, at 32k past 85 % — the oldest results of that answer are set aside, well below that. The same model
+  first writes down in a few lines what each said that matters for your request, and those lines stay in its
+  place, so the agent does not read it all again to remember it. The answer says how many were set aside.
+- Each new result gets its share of the room left (at most a quarter of the window).
+- With most of that room gone even so, the agent answers with what it has, without further tools, and says what it could not
+  cover — an answer rather than an overflow.
+- A tool call cut off halfway (the model ran out of room while writing it) is not run; the agent is told to ask
+  for less at a time.
+
+With a small window this is where the tools weigh in: their descriptions go with every request. With 8,192 tokens
+and 50 tools, about half the window is gone before anything is read; a larger window (llama-server's `-c`), or
+an agent with fewer tools, reads more in one answer.
+
+A long conversation is summarised rather than allowed to overflow the model's context. Once the conversation — your
+messages and the agent's answers; tool results are not kept after an answer — takes more than 60 % of the model's
+window, the older exchanges are replaced by a summary after the answer; the newest that
+fit in a fifth of the window stay word for word. The same happens before a message when the conversation no
+longer fits well (after switching to a model with a smaller window, say), and when the server refuses a request as
+too long before anything ran — then the message is sent again once. A kept conversation gets the summary in its
+note; one that is not kept, in memory. The chat marks the place with a dashed divider — "12 earlier exchanges
+summarised here" — and the summary unfolds when you click it. The messages above stay on screen, but the agent's
+memory of them is the summary from then on. A reopened conversation starts with the same divider. A kept conversation is also summarised past 50 exchanges, so its note does not grow
+without end.
+
+In Obsidian's status bar, beside the backlinks count, a small bar shows how much of the model's context window the
+conversation takes after each answer: "≈ 12.3k of 32.8k tokens · 38%" — what the next message carries, your
+messages and the agent's answers, estimated from their length. It grows as the conversation does, turns orange from
+50 % and red from 80 %, and drops when the conversation is summarised at 60 %. The notes and pages the agent read
+while answering are not kept after the answer, so they are not in the bar; the tooltip says how far the last
+answer went with them. The window is the one the server says it has, or the connection's *context window* setting
+for a cloud API.
+
+The agent answers through whatever endpoint the default connection (Settings → Connections) points at, so start
+your `llama-server` first — without one an answer ends with a message saying the server does not answer.
 
 ## Commands
 
@@ -91,68 +130,83 @@ conversation, saved in `.sessions/` like a chat one (the chat's picker opens it)
 The CLI always exits 0; an error is a line starting with `Error:`, and `format=json` answers `"ok": false` with the
 error. `obsidian help agent:ask` lists every flag.
 
-## Secrets
+## Keys
 
-Settings → **Hiro Agent** → Secrets binds a variable name to a secret in Obsidian's keychain, so a connection's key
-can say
+Keys live in **Obsidian's keychain** (Settings → **Keychain**), never in the plugin's settings. A setting names
+the keychain entry it means:
 
 ```yaml
-llm:
-  api_key: ${LLM_API_KEY}
+llm_profiles:
+  cloud:
+    api_key: ${openai-api-key}
 ```
 
-and the settings hold no secret of their own. **This plugin stores only the name.** The value lives in Obsidian's own secret
-store — DPAPI on Windows, the Keychain on macOS, libsecret or KWallet on Linux — so it is never written to
+— you rarely type that: a connection's **API key** (Connections → Add connection, or the pencil) is Obsidian's own keychain
+picker, where you choose an entry or add one. **The plugin stores only the name.** The value stays in Obsidian's
+secret store — DPAPI on Windows, the Keychain on macOS, libsecret or KWallet on Linux — so it is never written to
 `data.json`, which sits inside the vault and syncs with it.
 
-The keychain id is derived from the variable name, with underscores turned into dashes — `LLM_API_KEY` becomes
-`llm-api-key`, because Obsidian's ids take only lowercase letters, digits and dashes. If you created the secret
-in Obsidian's own Keychain dialog under some other name, pick it from the dropdown on the row instead.
+In an MCP server's environment or headers a key is written the same way, by its keychain name:
+`GITHUB_TOKEN=${github-token}`, `Authorization: Bearer ${service-key}`. Keychain names are lowercase letters,
+digits and dashes.
 
-The variable name is yours to choose, and nothing infers it: whatever you bind has to be referenced from a
-setting to be used. **The keychain is the only place a key comes from:** a name with no binding has no value
-(the environment is not read, and there is no `OPENAI_API_KEY` fallback), and a key typed into a setting is
-refused — it would sit in `data.json`.
+**The keychain is the only place a key comes from:** a name the keychain does not have gives no key (the
+environment is not read, and there is no `OPENAI_API_KEY` fallback), and a key typed into a setting is refused —
+it would sit in `data.json`. A key is read when a turn or an MCP server needs it, so a changed key applies from the
+next turn.
 
-A secret is read when a turn or an MCP server needs it, so a changed key applies from the next turn.
+Before 0.9.1 a **Secrets** tab bound names such as `${OPENAI_API_KEY}` to keychain entries. The first start of
+0.9.1 renames every such reference to the entry it stood for (`${openai-api-key}`) and drops the tab (#147).
 
 ## Settings
 
 Most of the tab is the agent's own configuration, kept in this plugin's settings for this vault; a vault
 without any starts from the defaults. Each change is checked against the schema before saving;
-a refused value shows its reason beside the field. A change applies from the next turn, in open conversations
-too.
+a stored value shows a short *Saved* beside the field, and a refused one its reason there and in a notice. Lists
+save as you type. A change applies from the next message, in open conversations too.
 
-Five tabs:
+Four tabs, in the order setting up meets them:
 
-- **General** — *Connections*: where the agent sends your notes (`llm_profiles`). Choose the default, add,
-  remove, test that one answers, and edit its provider, URL, model and key reference (the pencil; sampling
-  settings are under *More settings*). A llama.cpp server answering on `127.0.0.1:8080` or `:8090` is offered with
-  one click.
-- **Agents** — which agent is *used when none is chosen*, and an editor for any agent: pick it at the top (with
-  *New*, *Duplicate*, *Delete* or *Reset*), then its description and prompt, the **folders** it may work in, and
-  its **tools** — one switch per group, unfolding to single tools. Connection, step limit and model settings are
-  folded under *More*. Nothing saves until *Save*.
+- **Connections** — where the agent sends your notes. Each connection's row says what it is (model, address,
+  key), with *Test*, the pencil and the bin. *Add connection* opens one form: a name, the address (empty for
+  OpenAI), the model and a key from Obsidian's keychain, with *Test* — which sends the key as a message would, so a
+  refused key shows here, and lists the server's models as suggestions — and *Save*. There is no kind to pick: every
+  server speaks the same API, and the plugin finds out from the address whether llama.cpp, Ollama, LM Studio or vLLM
+  answers there, which tells it the loaded model and the context window. The row names what it found. An address
+  without a path (`http://127.0.0.1:11434`) gets `/v1` added. Sampling, context window and output
+  length are folded under *More for …* on each row. A server answering on this computer's usual ports — llama.cpp
+  8080 and 8090, vLLM 8000, LM Studio 1234, Ollama 11434 — is offered with one click. A connection whose key and address came from another device says so, and *Approve*
+  asks in a dialog where the key would go.
+- **Features** — switches for web pages, undo, memory and audio transcription; each one's own settings are folded
+  under it while it is on (*More for …*). See below.
+- **Agents** — the *Default agent*, and an editor for any *Agent*: pick it at the top (with *New*, *Duplicate*,
+  *Delete* or *Reset*), then its description and prompt, the **folders** it may work in, and its **tools** — one
+  switch per group, unfolding to single tools. Connection, step limit and model settings are folded under *More*.
+  The built-in assistant works as it is. Nothing saves until *Save*: while there are changes, *Save* and *Discard*
+  stay at the top of the editor, and closing the settings asks whether to save them, drop them, or keep them for
+  later.
   - Folders are enforced by the tools, not asked for in the prompt. While any are set, the tools that could reach
     past them are greyed out, with the reason: they are withheld from that agent.
   - Changing a built-in agent saves your own copy in this vault's `.agents/` folder; *Reset* drops it. *New*
     and *Duplicate* save there too, so the agent travels with the vault; those can be deleted. Built-in agents
     cannot.
   - MCP tools appear in one *MCP* group, as "server: tool", with *All MCP tools* (`mcp:*`) first, once the
-    server can be reached (see Features). Switching one tool off while *All MCP tools* is on lists the others by name. There are no shell tools and no `git`: the plugin has no tool that runs a shell.
-- **Features** — switches for web pages, undo, memory and audio transcription. Once audio is on, it
-  shows the paths it needs — whisper.cpp, its model, and ffmpeg. Each program's path says which file it runs;
+    server has been listed on this device — by its *Test* under Features, or by an answer that used it. Opening
+    the tab starts no server. Switching one tool off while *All MCP tools* is on lists the others by name. There are no shell tools and no `git`: the plugin has no tool that runs a shell.
+- **Features** (details) — once audio is on, it shows the paths it needs — whisper.cpp, its model, and ffmpeg. Each program's path says which file it runs;
   when the one set is not found but one is on PATH, *Use it* takes that one. *Test* runs the program once and
   says whether it works. There is no web search of its own: add a search engine's MCP server for that.
   - **MCP servers** — add, edit, switch on and off, remove, and *Test* (connect and list the tools). A `stdio`
     server is a program started on this computer: saving one shows its exact command line and asks, and it runs
     only once approved **on this device** — the approval is kept outside the vault, so a server that arrives by
     sync, or whose command, arguments or environment changed, waits for a new yes. It gets PATH and the like plus
-    its own `env`, nothing else of Obsidian's environment. An `http` server needs no approval. Keys in `env` or a
-    header are `${NAME}` references to Secrets (`Authorization: Bearer ${NAME}`); a key written out is refused.
+    its own `env`, nothing else of Obsidian's environment. An `http` server needs approval only when it sends a
+    key. Keys in `env` or a header name a keychain entry (`Authorization: Bearer ${service-key}`); a key written
+    out is refused.
     A server is started on first use and kept while Obsidian runs; every start is in the plugin's log.
-- **Secrets** — see below.
-- **Advanced** — every other setting, one card per block, with each field's help text. *Developer* switches on `obsidian agent:tool`, which runs one of the agent's tools from
-  the command line to test it inside Obsidian.
+- **Advanced** — *Developer* (kept on this device only; it does not sync), for testing the plugin: it switches on
+  `obsidian agent:tool`, which runs one of the agent's tools from the command line, and lets `agent:ask` change
+  notes without the dialog. Leave it off otherwise. Any setting no other tab shows would appear here too.
 
-API key fields take a reference such as `${LLM_API_KEY}`, never the key: put the key under Secrets.
+A connection's API key is picked from Obsidian's keychain; nowhere does a setting take the key itself — see
+[Keys](#keys).

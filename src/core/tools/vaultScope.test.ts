@@ -168,9 +168,12 @@ describe("test_vault_scope.py", () => {
     expect(result).toContain("only 'Notes/' searched");
   });
 
-  it("an unrestricted search_vault still answers nothing for no match, as Python does", async () => {
+  it("an unrestricted search_vault says in words that nothing matched, and what it looked for (#160)", async () => {
     const vault = await makeVault(NOTES);
-    expect(await vault.tool("search_vault").run({ query: "zyxwvutsrq_nomatch" })).toBe("");
+    expect(await vault.tool("search_vault").run({ query: "zyxwvutsrq_nomatch" }))
+      .toBe("No notes contain 'zyxwvutsrq_nomatch'. Try fewer or other words, or find_notes to search by name.");
+    expect(await vault.tool("search_vault").run({ query: "nomatch_x", tag: "nosuchtag" }))
+      .toBe("No notes contain 'nomatch_x' and are tagged #nosuchtag. Try fewer or other words, or find_notes to search by name.");
   });
 
   it("find_notes with a scope says only its folders were searched", async () => {

@@ -9,7 +9,9 @@
 
 import { fnmatch } from "../fnmatch";
 import { basename, checkNoteName, noteFile, PathError, safeResolve, scopeHint } from "../paths";
-import { notFound, resolveExistingNote, suggestFolders, suggestNotes, vaultFiles, vaultNotes, type VaultPort } from "../vault";
+import {
+  hiddenBelow, notFound, resolveExistingNote, suggestFolders, suggestNotes, vaultFiles, vaultNotes, type VaultPort,
+} from "../vault";
 import { defineTool, type Tool } from "./tool";
 
 /** Notes per listing: "list everything" in a vault of a few hundred notes would crowd out the context. */
@@ -57,6 +59,18 @@ export function makeVaultTools(vault: VaultPort, scope: string[] | null = null):
     }
     await vault.write(resolved, args.str("content"));
     return `Created note at '${path}'`;
+  }, {
+    // Replacing a note that exists is overwriting it: asked about like update_note (#157). A new note is not
+    destructiveWhen: async (args) => {
+      if (!args.bool("overwrite")) return false;
+      const path = noteFile(args.str("path"));
+      if (checkNoteName(path)) return false;  // refused by the tool itself
+      try {
+        return await vault.isFile(safeResolve(path, scope));
+      } catch {
+        return false;  // outside the agent's folders: refused by the tool itself
+      }
+    },
   });
 
   /** The note an existing-note tool writes to, or the error to return (update_note, append_to_note). */
@@ -122,9 +136,11 @@ export function makeVaultTools(vault: VaultPort, scope: string[] | null = null):
       const left = paths.length - shown.length;
       return shown.join("\n") + (left ? `\n[${left} more, name a folder to narrow the list]` : "");
     };
-    // Python's glob/rglob, which — unlike the other tools — do include notes in dot folders
+    // Not the notes below a dot folder — .sessions, .memory, .trash — as no other tool shows them either, and none
+    // may read them (#158). Naming one (.trash, to restore from it) lists what is directly in it.
     const under = async (base: string): Promise<string[]> => (await vault.files())
       .filter((file) => file.endsWith(".md") && (base ? file.startsWith(`${base}/`) : true))
+      .filter((file) => !hiddenBelow(file, base))
       .filter((file) => recursive || !file.slice(base ? base.length + 1 : 0).includes("/"));
 
     if (path) {

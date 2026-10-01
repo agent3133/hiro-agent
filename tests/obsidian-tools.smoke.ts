@@ -2,7 +2,7 @@
  * The agent's tools that only work inside Obsidian (#81), driven through `obsidian agent:tool` against the vault that
  * is open in Obsidian. Everything happens in `_agent-smoke/`, which is emptied first and last.
  *
- * Needs: Obsidian running with the vault open, Settings → Runtime → "Agent tools on the Obsidian CLI (developer)"
+ * Needs: Obsidian running with the vault open, Settings → Hiro Agent → Advanced → Developer
  * on, and the `obsidian` command on PATH. The suite reloads the plugin first, so the build on disk is what it tests.
  *
  * Run from plugin/:  node tests/run-smoke.mjs <vault name> tests/obsidian-tools.smoke.ts
@@ -76,7 +76,7 @@ for (let attempt = 0; attempt < 20 && !answers(probe); attempt++) {
 }
 if (!answers(probe)) {
   console.log(`agent:tool did not answer: ${probe}`);
-  console.log("Is Settings → Runtime → \"Agent tools on the Obsidian CLI (developer)\" on?");
+  console.log("Is Settings → Hiro Agent → Advanced → Developer on?");
   process.exit(2);
 }
 
@@ -226,7 +226,7 @@ try {
         heard = tool("read_attachment", { path: "tone.m4a" });
       }
       if (heard.includes("audio transcription is disabled")) {
-        console.log("      (audio is off in the runtime's config: recordings not checked)");
+        console.log("      (audio is off in the settings: recordings not checked)");
       } else {
         check("a recording is transcribed and saved below its embed",
               heard.startsWith("Transcript of 'tone.m4a' (") && heard.includes("new transcription")

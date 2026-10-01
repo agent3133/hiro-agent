@@ -50,7 +50,7 @@ export function isSecretKey(key: string): boolean {
 
 /** Sentence case keeps an acronym in capitals: "whisper_cli" is "Whisper CLI", not "Whisper cli" (#108). */
 const ACRONYMS: Record<string, string> = {
-  api: "API", cli: "CLI", gpu: "GPU", id: "ID", llm: "LLM", mb: "MB", mcp: "MCP", url: "URL",
+  api: "API", cli: "CLI", gpu: "GPU", id: "ID", k: "K", llm: "LLM", mb: "MB", mcp: "MCP", p: "P", url: "URL",
 };
 
 /** `max_content_length` → "Max content length". */
@@ -167,7 +167,7 @@ export function parseInput(field: ConfigField, input: string | boolean): Parsed 
 
 /**
  * Whether a secret field may take this input. Only an `${ENV}` reference is accepted: the value itself belongs in
- * Obsidian's keychain (the Secrets section), never in the settings, which are plain text in the vault.
+ * Obsidian's keychain (Settings → Keychain), never in the settings, which are plain text in the vault.
  */
 export function acceptsSecret(input: string): boolean {
   const text = input.trim();

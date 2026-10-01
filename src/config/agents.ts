@@ -108,7 +108,10 @@ export class AgentCatalog {
   /** *mcpTools*: the MCP servers' tools as the settings list them (#87); none when not given. */
   constructor(private readonly vault: VaultPort,
               private readonly config: () => { defaultAgent: string; profiles: string[] },
-              private readonly mcpTools: () => Promise<ToolInfo[]> = async () => []) {}
+              private readonly mcpTools: () => Promise<ToolInfo[]> = async () => [],
+              private readonly switchedOff: () => Record<string, string> = () => ({}),
+              /** The configured MCP servers' names: their tools may be listed before a server was ever reached. */
+              private readonly mcpServerNames: () => string[] = () => []) {}
 
   private bundled(): AgentDefinition[] {
     return (bundledAgents as { file: string; text: string }[])
@@ -179,11 +182,13 @@ export class AgentCatalog {
   async tools(): Promise<ToolInfo[]> {
     const grouped = new Map(TOOL_GROUPS.flatMap(([group, names]) => names.map((name) => [name, group] as const)));
     const order = [...TOOL_GROUPS.map(([group]) => group), "Other"];
+    const off = this.switchedOff();
     const builtin = (specs as { name: string; description: string }[]).map((spec) => ({
       name: spec.name, group: grouped.get(spec.name) ?? "Other",
       description: (spec.description ?? "").trim().split("\n")[0],
       destructive: DESTRUCTIVE.has(spec.name), ignores_scope: IGNORES_SCOPE.has(spec.name),
       leaves_machine: LEAVES_MACHINE.has(spec.name), runs_programs: false,
+      ...(off[spec.name] ? { off_in: off[spec.name] } : {}),
     })).sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || a.name.localeCompare(b.name));
     // The MCP servers' after the built-in ones, in the servers' order (mcp/agentTools.ts mcpToolInfos)
     return [...builtin, ...(await this.mcpTools().catch(() => []))];
@@ -193,9 +198,12 @@ export class AgentCatalog {
   private async problems(fields: Partial<AgentFields>, listed: string[] = []): Promise<ConfigFieldError[]> {
     const problems: ConfigFieldError[] = [];
     const known = new Set((await this.tools()).map((tool) => tool.name));
+    // A tool of a configured server counts even before this device listed that server (#178)
+    const servers = new Set(this.mcpServerNames());
+    const ofServer = (name: string): boolean => name.includes("__") && servers.has(name.slice(0, name.indexOf("__")));
     if (fields.tools) {
       for (const name of fields.tools) {
-        if (!known.has(name) && name !== "mcp:*" && !listed.includes(name)) {
+        if (!known.has(name) && name !== "mcp:*" && !listed.includes(name) && !ofServer(name)) {
           problems.push({ path: "tools", message: `there is no tool called '${name}'` });
         }
       }
@@ -303,4 +311,15 @@ export class AgentCatalog {
     await this.vault.remove(detail.path);
     return this.agent(name);
   }
+}
+
+/**
+ * The tools *listed* that the agent cannot use now (#146): names the plugin does not have — left from an older
+ * version, like `git` or `tasknotes_cli` — and MCP tools whose server is off or cannot be reached. *known* is every
+ * tool the plugin offers now, the reachable MCP servers' included. The turn ignores both kinds; the Agents tab says so.
+ */
+export function unusableTools(listed: string[], known: string[]): { missing: string[]; unreachable: string[] } {
+  const offered = new Set(known);
+  const unusable = listed.filter((name) => name !== "mcp:*" && !offered.has(name));
+  return { missing: unusable.filter((name) => !name.includes("__")), unreachable: unusable.filter((name) => name.includes("__")) };
 }

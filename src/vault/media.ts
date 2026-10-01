@@ -25,11 +25,16 @@ export interface AudioSettings {
   threads: number | null;
   timeoutFactor: number;
   extraArgs: string[];
+  /**
+   * Whether this device approved the programs as set (#136): false when they came from another device's settings
+   * and nobody here said yes; they do not run then.
+   */
+  approved: boolean;
 }
 
 export const DEFAULT_AUDIO: AudioSettings = {
   enabled: false, whisperCli: "whisper-cli", ffmpeg: "ffmpeg", model: null, language: "auto", useGpu: false,
-  threads: null, timeoutFactor: 3, extraArgs: [],
+  threads: null, timeoutFactor: 3, extraArgs: [], approved: true,
 };
 
 /** Frames sampled from a video at most (Python's _VIDEO_MAX_FRAMES). */
@@ -40,7 +45,7 @@ interface Run { code: number; stdout: string; stderr: string; missing: boolean }
 function run(program: string, args: string[], timeoutMs: number): Promise<Run> {
   return new Promise((resolve) => {
     const child = execFile(program, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024,
-                                            encoding: "utf8", env: programEnv() }, (error, stdout, stderr) => {
+                                            encoding: "utf8", env: programEnv(process.env, process.platform) }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
       resolve({ code, stdout: String(stdout), stderr: String(stderr), missing: (error as { code?: unknown })?.code === "ENOENT" });
     });

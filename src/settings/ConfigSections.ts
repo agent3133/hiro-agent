@@ -25,7 +25,6 @@ export interface ConfigHost {
 
 /** Headings that say what a block is for, where its key alone would not. */
 const TITLES: Record<string, string> = {
-  llm: "Connection without a profile",
   vault: "Vault",
   agents: "Agent folders",
   tools: "Tool folders",
@@ -41,8 +40,7 @@ const TITLES: Record<string, string> = {
  * Obsidian has open, and `ui` only styles the terminal REPL. The runtime's agent and tool folders and its external
  * programs do nothing in the plugin, which takes agents from `.agents/` and runs no shell (decided 2026-09-29).
  */
-const NEVER = ["llm_profiles", "default_llm_profile", "mcp_servers", "vault.path", "ui", "agents", "tools",
-               "external_tools"];
+const NEVER = ["llm_profiles", "default_llm_profile", "mcp_servers", "vault.path"];
 
 /** Everything not already shown on the other tabs, one card per block. `shown` holds those fields' paths. */
 export function renderAdvanced(pane: HTMLElement, doc: ConfigDocument, host: ConfigHost, shown: string[]): void {
@@ -86,30 +84,31 @@ export function renderField(container: HTMLElement, field: ConfigField, host: Co
   setting.setDesc(baseDesc);
   setting.nameEl.title = field.path.join(".");  // where it lives in config.yaml, for whoever wants to know
 
+  const name = options.label ?? field.label;
+  // One way of answering a change (#149): a short "Saved" by the field; a refusal on the field and as a notice
+  const refuse = (reason: string): void => {
+    setting.setDesc(reason);
+    setting.descEl.addClass("mod-warning");
+    new Notice(`${name} was not saved: ${reason}`, 8_000);
+  };
   const report = (result: ConfigWriteResult | null): void => {
     if (!result) return;
     const dotted = field.path.join(".");
     const problems = result.fields.filter((item) => item.path === dotted || item.path.startsWith(`${dotted}.`));
     if (!result.ok) {
-      setting.setDesc(problems.map((item) => item.message).join("; ") || result.error || "Not saved.");
-      setting.descEl.addClass("mod-warning");
+      refuse(problems.map((item) => item.message).join("; ") || result.error || "Not saved.");
       return;
     }
     setting.setDesc(baseDesc);
     setting.descEl.removeClass("mod-warning");
-    if (result.restart_required.length) {
-      new Notice(`Saved. ${result.restart_required.join(", ")} applies after the agent restarts.`);
-    } else if (!result.reloaded && result.changed.length) {
-      new Notice("Saved, but the agent could not take the change up — see the agent's log.");
-    }
+    flashSaved(setting);
     options.onSaved?.();
   };
 
   const send = async (input: string | boolean): Promise<void> => {
     const parsed = parseInput(field, input);
     if (!parsed.ok) {
-      setting.setDesc(`Expected ${parsed.error}.`);
-      setting.descEl.addClass("mod-warning");
+      refuse(`expected ${parsed.error}.`);
       return;
     }
     report(await host.save(nest(field.path, parsed.value)));
@@ -133,19 +132,32 @@ export function renderField(container: HTMLElement, field: ConfigField, host: Co
       setting.addTextArea((area) => {
         area.setPlaceholder(display(field.defaultValue) || "one per line").setValue(display(field.value));
         area.inputEl.rows = 3;
-        area.inputEl.addEventListener("change", () => void send(area.getValue()));
+        // Saved while typing, a moment after the last key, and at once on leaving the box (#149)
+        let timer: number | undefined;
+        const flush = (): void => {
+          if (timer === undefined) return;
+          window.clearTimeout(timer);
+          timer = undefined;
+          void send(area.getValue());
+        };
+        area.inputEl.addEventListener("input", () => {
+          window.clearTimeout(timer);
+          timer = window.setTimeout(flush, 800);
+        });
+        area.inputEl.addEventListener("blur", flush);
       });
       break;
     default:
       setting.addText((text) => {
         if (field.secret) {
           // The stored value never comes into this box: it is masked, and a mask is not an input
-          text.setPlaceholder(field.value ? `${display(field.value)} (set)` : "${LLM_API_KEY}");
+          text.setPlaceholder(field.value ? `${display(field.value)} (set)` : "${openai-api-key}");
           text.inputEl.addEventListener("change", () => {
             const input = text.getValue();
             if (!input.trim()) return;  // leaving the box empty keeps what is stored
             if (!acceptsSecret(input)) {
-              new Notice("Put the key itself under Secrets, then write its variable here, e.g. ${LLM_API_KEY}. "
+              new Notice("Put the key in Obsidian's keychain (Settings → Keychain), then write its name here, e.g. "
+                         + "${openai-api-key}. "
                          + "A key typed here would be stored as plain text in the settings, which sync with the vault.", 10_000);
               text.setValue("");
               return;
@@ -164,6 +176,13 @@ export function renderField(container: HTMLElement, field: ConfigField, host: Co
 
 function describe(field: ConfigField): string {
   if (field.help) return field.help;
-  if (field.secret) return "Takes an ${ENV} reference to a secret, never the key itself.";
+  if (field.secret) return "The name of a keychain entry, as ${openai-api-key}, never the key itself.";
   return "";
+}
+
+/** A short "Saved" next to the field's name. */
+function flashSaved(setting: Setting): void {
+  setting.nameEl.querySelector(".obsidian-agent-saved")?.remove();
+  const mark = setting.nameEl.createSpan({ cls: "obsidian-agent-saved", text: "Saved" });
+  window.setTimeout(() => mark.remove(), 1_500);
 }

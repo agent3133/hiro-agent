@@ -9,6 +9,7 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 
 import type { ConfigWriteResult } from "../api/types";
+import { messageOf } from "../core/errors";
 import { draftOf, emptyDraft, serverChange, type McpDraft } from "../mcp/draft";
 import type { McpServerStatus, McpTest } from "../mcp/service";
 import type { McpServerSpec } from "../mcp/servers";
@@ -27,8 +28,9 @@ export interface McpUiHost {
 export function renderMcp(container: HTMLElement, host: McpUiHost): void {
   const card = group(container, "MCP servers",
     "Tools from other programs and services (Model Context Protocol). An agent uses them when its tools list "
-    + "them. A stdio server is a program started on this computer: it runs only once approved on this device, "
-    + "for exactly the command line shown. Keys go in Secrets; write ${NAME} here.");
+    + "them. A server that is a program on this computer runs only once approved on this device, for "
+    + "exactly the command line shown. A key stays in Obsidian's keychain (Settings → Keychain): write "
+    + "${its-name} in the environment or a header.");
   const servers = host.status();
   if (!servers.length) card.createEl("p", { cls: "setting-item-description", text: "No MCP servers yet." });
 
@@ -42,14 +44,21 @@ export function renderMcp(container: HTMLElement, host: McpUiHost): void {
         cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
         text: server.approved ? "Approved to run on this device." : "Not approved on this device: it will not start.",
       });
+    } else if (server.commandLine) {
+      // It sends a key from the keychain: used only once approved here, for this address and these headers (#136)
+      setting.descEl.createDiv({
+        cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
+        text: server.approved ? "Approved on this device to receive the key it names."
+          : "Not approved on this device: it would receive a key from your keychain, so it is not used.",
+      });
     } else {
       setting.descEl.createDiv({ cls: "obsidian-agent-found", text: "Sends what the agent asks it to this address." });
     }
     const result = setting.descEl.createDiv({ cls: "obsidian-agent-mcp-result" });
 
-    if (spec.transport === "stdio" && !server.approved) {
+    if (!server.approved) {
       setting.addButton((button) => button.setButtonText("Approve").setCta().onClick(() => {
-        new ApproveModal(host.app, spec.name, server.commandLine, (yes) => {
+        new ApproveModal(host.app, spec, server.commandLine, (yes) => {
           if (!yes) return;
           host.approve(spec.name);
           host.redraw();
@@ -70,7 +79,13 @@ export function renderMcp(container: HTMLElement, host: McpUiHost): void {
     setting.addToggle((toggle) => toggle.setValue(spec.enabled).setTooltip("On or off, for every agent")
       .onChange(async (value) => {
         const saved = await host.save({ mcp_servers: { [spec.name]: { enabled: value } } });
-        if (!saved?.ok) toggle.setValue(!value);
+        if (saved?.ok) return;
+        toggle.setValue(!value);
+        // A null result was already told as a notice by the save
+        if (saved) {
+          const reason = saved.fields.map((item) => item.message).join("; ") || saved.error || "refused";
+          new Notice(`'${spec.name}' was not switched ${value ? "on" : "off"}: ${reason}`, 10_000);
+        }
       }));
     setting.addExtraButton((button) => button.setIcon("pencil").setTooltip("Edit").onClick(() => {
       openEditor(host, spec, servers.map((one) => one.spec.name));
@@ -95,7 +110,7 @@ function openEditor(host: McpUiHost, previous: McpServerSpec | null, taken: stri
     try {
       change = serverChange(draft, previous, taken);
     } catch (error) {
-      return (error as Error).message;
+      return messageOf(error);
     }
     const saved = await host.save(change);
     if (!saved) return "Not saved.";
@@ -103,11 +118,11 @@ function openEditor(host: McpUiHost, previous: McpServerSpec | null, taken: stri
     if (previous && previous.name !== draft.name.trim()) await host.revoke(previous.name);
     // As stored now; a stdio server whose command line is already approved here is not asked about again
     const stored = host.status().find((one) => one.spec.name === draft.name.trim());
-    if (stored && stored.spec.transport === "stdio" && !stored.approved) {
+    if (stored && !stored.approved) {
       const spec = stored.spec;
-      new ApproveModal(host.app, spec.name, stored.commandLine, (yes) => {
+      new ApproveModal(host.app, spec, stored.commandLine, (yes) => {
         if (yes) host.approve(spec.name);
-        else new Notice(`Hiro Agent: '${spec.name}' is saved, but will not start on this device until you approve it.`);
+        else new Notice(`Hiro Agent: '${spec.name}' is saved, but is not used on this device until you approve it.`);
         host.redraw();
       }).open();
     } else {
@@ -117,24 +132,34 @@ function openEditor(host: McpUiHost, previous: McpServerSpec | null, taken: stri
   }).open();
 }
 
-/** What will run, word for word, and a yes that holds for this device only. Dismissing is no. */
+/**
+ * What will run — or where a key will go — word for word, and a yes that holds for this device only. Dismissing
+ * is no.
+ */
 class ApproveModal extends Modal {
   private answered = false;
 
-  constructor(app: App, private readonly name: string, private readonly line: string,
+  constructor(app: App, private readonly spec: McpServerSpec, private readonly line: string,
               private readonly decide: (yes: boolean) => void) {
     super(app);
   }
 
   override onOpen(): void {
     const { contentEl } = this;
-    this.setTitle(`Allow '${this.name}' to run on this computer?`);
-    contentEl.createEl("p", { text: "This MCP server is a program. The agent starts it with your rights whenever "
-      + "an agent that lists its tools needs it:" });
+    const stdio = this.spec.transport === "stdio";
+    this.setTitle(stdio ? `Allow '${this.spec.name}' to run on this computer?`
+      : `Allow '${this.spec.name}' to receive a key from your keychain?`);
+    contentEl.createEl("p", { text: stdio
+      ? "This MCP server is a program. The agent starts it with your rights whenever an agent that lists its "
+        + "tools needs it:"
+      : "This MCP server is reached over the network, and its address or headers name a key from your keychain. "
+        + "The key is sent there whenever an agent that lists its tools needs it:" });
     contentEl.createEl("pre", { text: this.line, cls: "obsidian-agent-confirm-detail" });
-    contentEl.createEl("p", { cls: "setting-item-description", text: "The approval is for this command line on this "
-      + "device only. If the command, its arguments or its environment change — here or on another device — it "
-      + "is asked for again." });
+    contentEl.createEl("p", { cls: "setting-item-description", text: stdio
+      ? "The approval is for this command line on this device only. If the command, its arguments or its "
+        + "environment change — here or on another device — it is asked for again."
+      : "The approval is for this address and these headers on this device only. If they change — here or on "
+        + "another device — it is asked for again." });
     new Setting(contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.answer(false)))
       .addButton((button) => button.setButtonText("Allow on this device").setWarning().onClick(() => this.answer(true)));
@@ -174,9 +199,11 @@ class ServerModal extends Modal {
 
     new Setting(contentEl).setName("Name").setDesc("Its tools are named name__tool in an agent's list.")
       .addText((text) => text.setValue(draft.name).onChange((value) => { draft.name = value; }));
-    new Setting(contentEl).setName("Transport")
-      .setDesc("stdio: a program started on this computer. http: a server reached at a URL (streamable HTTP).")
-      .addDropdown((dropdown) => dropdown.addOption("stdio", "stdio").addOption("http", "http")
+    new Setting(contentEl).setName("Where it runs")
+      .setDesc("A program this computer starts, with your rights (stdio), or a server reached at an address "
+               + "(streamable HTTP).")
+      .addDropdown((dropdown) => dropdown.addOption("stdio", "A program on this computer")
+        .addOption("http", "A server at an address")
         .setValue(draft.transport).onChange((value) => {
           draft.transport = value === "http" ? "http" : "stdio";
           this.draw();
@@ -186,14 +213,14 @@ class ServerModal extends Modal {
         .addText((text) => text.setValue(draft.command).onChange((value) => { draft.command = value; }));
       area(contentEl, "Arguments", "One per line. ${vault_path} is this vault's folder.", draft.args,
            (value) => { draft.args = value; });
-      area(contentEl, "Environment", "KEY=value, one per line; a key as KEY=${NAME}, from Secrets. The server gets "
+      area(contentEl, "Environment", "KEY=value, one per line; a key as KEY=${its-keychain-name}. The server gets "
            + "these, PATH and the like — nothing else of Obsidian's environment.", draft.env,
            (value) => { draft.env = value; });
     } else {
       new Setting(contentEl).setName("URL")
         .addText((text) => text.setPlaceholder("https://example.com/mcp").setValue(draft.url)
           .onChange((value) => { draft.url = value; }));
-      area(contentEl, "Headers", "Name: value, one per line; a key as Authorization: Bearer ${NAME}, from Secrets.",
+      area(contentEl, "Headers", "Name: value, one per line; a key as Authorization: Bearer ${its-keychain-name}.",
            draft.headers, (value) => { draft.headers = value; });
     }
     new Setting(contentEl).setName("Only these tools")

@@ -26,7 +26,8 @@ export interface VaultPort {
   move(from: string, to: string): Promise<void>;
 }
 
-function hiddenBelow(path: string, root: string): boolean {
+/** Whether *path* lies in a dot folder below *root* (.trash, .sessions): what the note tools leave out. */
+export function hiddenBelow(path: string, root: string): boolean {
   const rest = root ? path.slice(root.length + 1) : path;
   return rest.split("/").some((part) => part.startsWith("."));
 }

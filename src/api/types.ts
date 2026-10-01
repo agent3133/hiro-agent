@@ -1,7 +1,6 @@
 /**
- * The shapes the chat view, the settings and the in-plugin agent share: agents, connections, conversations, turns,
- * the configuration document. They began as the runtime's protocol (docs/obsidian-plugin-plan.md §4); since the
- * cut-over (#88) the plugin answers them itself.
+ * The shapes the chat view, the settings, the command line and the agent share: agents, connections, turns, the
+ * configuration document. Conversations are the core's (`core/sessions.ts` SessionSummary).
  */
 
 export interface AgentSummary {
@@ -13,13 +12,6 @@ export interface AgentSummary {
   default?: boolean;
   /** Where its file is: built in, the user's folder, the vault's .agents, or elsewhere. */
   source?: AgentSource;
-}
-
-export interface SessionSummary {
-  name: string;
-  note_path?: string;
-  updated?: string;
-  exchanges?: number;
 }
 
 /** One named LLM connection from the config: where a turn's notes would actually be sent. */
@@ -89,6 +81,8 @@ export interface ToolInfo {
   ignores_scope: boolean;
   leaves_machine: boolean;
   runs_programs: boolean;
+  /** The Features switch that is off for this tool, by name: the model is not offered it until it is on (#145). */
+  off_in?: string;
 }
 
 /** A save or create the runtime refused, field by field, with nothing written. */
@@ -99,10 +93,9 @@ export interface ConfigDocument {
   path: string;
   exists: boolean;
   values: Record<string, unknown>;
-  /** Dotted paths of the fields that hold a secret, as the runtime judges it. */
+  /** Dotted paths of the fields that hold a secret. */
   secrets: Record<string, boolean>;
   schema: JsonSchema;
-  restart_required_keys: string[];
 }
 
 /** The subset of JSON Schema that Pydantic emits for `AppConfig`. */
@@ -128,17 +121,14 @@ export interface ConfigFieldError {
 export interface ConfigWriteResult {
   ok: boolean;
   changed: string[];
-  restart_required: string[];
-  reloaded: boolean;
   error?: string;
   fields: ConfigFieldError[];
 }
 
+/** What the chat header and the command line list: the agents and connections, and the default connection. */
 export interface ReadyInfo {
-  protocol: number;
   version: string;
   vault: string;
-  model: string;
   agents: AgentSummary[];
   profiles: ProfileSummary[];
   defaultProfile: string;
@@ -180,6 +170,18 @@ export interface TurnHandlers {
   onToolCall(call: ToolCall): void;
   onToolResult(callId: string, result: string, isError: boolean): void;
   onConfirmRequest(callId: string, name: string, input: unknown): void;
+  /**
+   * The conversation was just summarised (#154): *exchanges* went into *summary*, *before* this answer was asked
+   * for (the history no longer fitted) or after it.
+   */
+  onSummary?(exchanges: number, summary: string, when: "before" | "after"): void;
+  /** Older tool results of this answer were set aside to stay inside the context window (#154); *total* so far. */
+  onSetAside?(total: number): void;
+  /**
+   * How full the context window is after the answer (#151, #154): the tokens the conversation takes now — what the
+   * next message carries — of the window, whether estimated, and the most the answer took along the way.
+   */
+  onContext?(tokens: number, window: number, estimated: boolean, peak?: number): void;
   onDone(reply: string, cancelled: boolean, usage: Record<string, unknown>,
          changed: TurnChanges | null, compacted: number): void;
   onError(message: string, recoverable: boolean): void;

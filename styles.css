@@ -52,6 +52,9 @@
 .obsidian-agent-note { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 
 .obsidian-agent-composer { display: flex; gap: var(--size-4-2); align-items: flex-end; }
+/* The "+" for files sits right above Send (#190) */
+.obsidian-agent-actions { display: flex; flex-direction: column; align-items: center; gap: var(--size-4-1); }
+.obsidian-agent-add { align-self: center; }
 .obsidian-agent-input { flex: 1; resize: vertical; font-family: inherit; }
 
 .obsidian-agent-confirm-summary { font-weight: var(--font-semibold); }
@@ -144,14 +147,24 @@
   padding: var(--size-4-3) 0 var(--size-4-1);
 }
 
-/* A connection's fields open from its pencil button, so the details' own summary line is not needed */
-.obsidian-agent-connection > summary {
-  display: none;
-}
-
-.obsidian-agent-connection,
+/* A connection's sampling and limits, folded under its row (#149) */
+.obsidian-agent-connection-more,
 .obsidian-agent-nested {
   padding-left: var(--size-4-6);
+}
+
+.obsidian-agent-connection-more > summary,
+.obsidian-agent-feature-more > summary {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  padding: var(--size-4-1) 0;
+}
+
+/* What a connection's test said, in the connection form */
+.obsidian-agent-connection-result {
+  min-height: 1.5em;
+  padding: var(--size-4-2) 0;
 }
 
 /* Settings: an agent's prompt, full width under the Agent card's settings */
@@ -238,3 +251,145 @@
   min-width: 18em;
   font-family: var(--font-monospace);
 }
+
+/* Settings: a short "Saved" next to a field's name after a change was stored (#149) */
+.obsidian-agent-saved {
+  margin-left: var(--size-4-2);
+  color: var(--text-success);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Settings: Save and Discard for an agent's edits, at the top of the editor while there are any (#149) */
+.obsidian-agent-unsaved {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--background-secondary);
+  border: 1px solid var(--interactive-accent);
+  border-radius: var(--radius-m);
+  padding: var(--size-4-2) var(--size-4-3);
+  margin-bottom: var(--size-4-3);
+}
+
+.obsidian-agent-unsaved.is-hidden {
+  display: none;
+}
+
+/* Settings: a text field that takes a sentence, such as an agent's description (#149) */
+.obsidian-agent-wide-text .setting-item-info {
+  flex: 0 1 auto;
+}
+
+.obsidian-agent-wide-text .setting-item-control {
+  flex: 1 1 60%;
+}
+
+.obsidian-agent-wide-text .setting-item-control input[type="text"] {
+  width: 100%;
+}
+
+/* Status bar: how full the model's context window is, beside the backlinks count (#151) */
+.obsidian-agent-context {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1);
+}
+
+.obsidian-agent-context.is-hidden {
+  display: none;
+}
+
+.obsidian-agent-context-track {
+  display: inline-block;
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.obsidian-agent-context-fill {
+  display: block;
+  height: 100%;
+  width: var(--obsidian-agent-context-share, 0%);
+  background: var(--interactive-accent);
+}
+
+.obsidian-agent-context-fill.mod-high {
+  background: var(--color-orange);
+}
+
+.obsidian-agent-context-fill.mod-full {
+  background: var(--color-red);
+}
+
+/* Chat: where a conversation was summarised; the summary unfolds on demand (#154) */
+.obsidian-agent-summary-divider {
+  margin: var(--size-4-3) 0;
+}
+
+.obsidian-agent-summary-divider > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-summary-divider > summary::-webkit-details-marker {
+  display: none;
+}
+
+.obsidian-agent-summary-divider > summary::before,
+.obsidian-agent-summary-divider > summary::after {
+  content: "";
+  flex: 1 1 auto;
+  border-top: 1px dashed var(--background-modifier-border-hover);
+}
+
+.obsidian-agent-summary-divider[open] > summary .obsidian-agent-summary-label::after {
+  content: " · hide summary";
+}
+
+.obsidian-agent-summary-divider:not([open]) > summary .obsidian-agent-summary-label::after {
+  content: " · show summary";
+}
+
+.obsidian-agent-summary-body {
+  margin-top: var(--size-4-2);
+  padding: var(--size-4-2) var(--size-4-3);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+/* Chat: files added to the next message, and the chat while files are dragged over it (#190) */
+.obsidian-agent-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-1);
+  padding: var(--size-4-1) 0;
+}
+
+.obsidian-agent-attachments.is-hidden {
+  display: none;
+}
+
+.obsidian-agent-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1);
+  padding: 0 var(--size-4-1) 0 var(--size-4-2);
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-hover);
+  font-size: var(--font-ui-smaller);
+}
+
+.obsidian-agent-chat.is-dropping {
+  outline: 2px dashed var(--interactive-accent);
+  outline-offset: -4px;
+}
+

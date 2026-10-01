@@ -87,7 +87,7 @@ describe("agent:ask, the turn", () => {
     expect(result).toMatchObject({ ok: true, reply: "Summary.", agent: "assistant", connection: "cloud",
                                    session: "2026-09-29-1200-do-it", tool_calls: 2, changed: ["Notes/a.md"], stopped: false });
     expect(askText(result).startsWith("Summary.\n\n[changed: Notes/a.md]\n[assistant on cloud · 2 tool calls · ")).toBe(true);
-    expect(made.notices[0]).toContain("a turn from the terminal is running (assistant)");
+    expect(made.notices[0]).toContain("a request from the terminal is running (assistant)");
     expect(made.notices[0]).toContain("Ctrl+C in the terminal does not stop it");
     expect(made.notices[1]).toContain('is done — saved as "2026-09-29-1200-do-it"');
   });
@@ -168,7 +168,7 @@ describe("agent:ask, destructive tools", () => {
     const result = await answer;
     expect(made.confirmed).toEqual([["c1", false]]);
     expect(made.asked).toEqual([]);
-    expect(askText(result)).toContain("[delete_note: refused — a turn from the terminal needs allow=destructive for it]");
+    expect(askText(result)).toContain("[delete_note: refused — a request from the terminal needs allow=destructive for it]");
   });
 
   it("with allow=destructive, asks in the Obsidian window and does what the user answers", async () => {

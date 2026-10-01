@@ -1,13 +1,16 @@
 /**
- * web_fetch — ported from make_web_tools (src/obsidian_agent/tools/builtin/web.py), on Obsidian's
- * `requestUrl`, which is not held to the renderer's cross-origin rules (#84).
+ * web_fetch — ported from make_web_tools (src/obsidian_agent/tools/builtin/web.py). It fetches through
+ * core/publicFetch.ts over Node's http/https, which opens pages on the internet only: every address, redirects
+ * included, is checked before connecting (#138).
  *
  * Differences from Python, on purpose: an HTML page becomes Markdown through Obsidian's own `htmlToMarkdown`
  * (Python stripped it to plain text, losing links and headings). There is no web_search: search is an MCP
  * server's job, with the engine and the account the user picks (#118).
  */
 
-import { htmlToMarkdown, requestUrl } from "obsidian";
+import { htmlToMarkdown } from "obsidian";
+
+import { fetchPublic } from "../core/publicFetch";
 
 import { defineTool, type Tool } from "../core/tools/tool";
 
@@ -39,11 +42,6 @@ export function truncateContent(content: string, maxLength: number): string {
   return `${content.slice(0, maxLength)}\n\n[Content truncated to ${maxLength} characters.]`;
 }
 
-function withTimeout<T>(promise: Promise<T>, seconds: number): Promise<T> {
-  return Promise.race([promise, new Promise<T>((_, reject) => window.setTimeout(
-    () => reject(new Error(`no answer within ${seconds} seconds`)), seconds * 1000))]);
-}
-
 /** Text without its tags and entities. */
 function plain(html: string): string {
   return html.replace(/<[^>]+>/g, "").replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, "&")
@@ -61,17 +59,19 @@ function pageMarkdown(html: string): string {
 }
 
 export function makeWebTools(settings: WebSettings): Tool[] {
+  // Switched off in Features: not offered at all; the prompt says so (config/features.ts, #145)
+  if (!settings.fetch.enabled) return [];
   const webFetch = defineTool("web_fetch", async (args) => {
-    if (!settings.fetch.enabled) {
-      return "Error: opening web pages is switched off. The user can switch it on under Settings → Hiro Agent → "
-        + "Features → Open web pages.";
-    }
     const url = normalizeUrl(args.str("url"));
     try {
-      const response = await withTimeout(requestUrl({ url, headers: { Accept: acceptHeader(args.str("format")) },
-                                                      throw: false }), settings.fetch.timeoutSeconds);
+      // Only pages on the internet: every address, redirects included, is checked before connecting (#138)
+      const response = await fetchPublic(url, {
+        timeoutMs: settings.fetch.timeoutSeconds * 1000, headers: { Accept: acceptHeader(args.str("format")) },
+        // Room for the markup a page loses on the way to Markdown; the text is cut to the limit afterwards
+        maxBytes: settings.fetch.maxContentLength * 4,
+      });
       if (response.status >= 400) throw new Error(`HTTP ${response.status} for ${url}`);
-      const type = (response.headers["content-type"] ?? response.headers["Content-Type"] ?? "").toLowerCase();
+      const type = response.contentType.toLowerCase();
       const content = type.includes("text/html") ? pageMarkdown(response.text) : response.text;
       return truncateContent(content, settings.fetch.maxContentLength);
     } catch (error) {

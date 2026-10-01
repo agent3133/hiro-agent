@@ -1,5 +1,5 @@
 # A tag x.y.z builds the release from the source at that tag and publishes main.js, manifest.json and styles.css —
-# what Obsidian downloads. The tag's message is the release notes.
+# what Obsidian downloads. The tag message's body (below its first line, the version) is the release notes.
 name: Release
 
 on:
@@ -15,8 +15,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -33,7 +33,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: Provenance for main.js
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: main.js
       - name: Publish
@@ -41,6 +41,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" > notes.md
           gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
             --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

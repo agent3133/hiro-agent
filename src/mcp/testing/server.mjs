@@ -21,6 +21,11 @@ export function makeServer() {
   server.registerTool("wipe", { description: "Destroys something.", inputSchema: {},
                                 annotations: { destructiveHint: true } },
     async () => ({ content: [{ type: "text", text: "wiped" }] }));
+  server.registerTool("look", { description: "Only reads.", inputSchema: {}, annotations: { readOnlyHint: true } },
+    async () => ({ content: [{ type: "text", text: "looked" }] }));
+  server.registerTool("add", { description: "Adds without destroying.", inputSchema: {},
+                               annotations: { destructiveHint: false } },
+    async () => ({ content: [{ type: "text", text: "added" }] }));
   // What the process was given: its own env entry, and whether Obsidian's environment leaked in
   server.registerTool("environment", { description: "Reports the environment.", inputSchema: {} },
     async () => ({ content: [{ type: "text", text: JSON.stringify({

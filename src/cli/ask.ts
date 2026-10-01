@@ -117,7 +117,7 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
   const session = params.session || host.sessionName(prompt);
   const connection = params.connection || "";
   const shown = prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt;
-  host.notice(`Hiro Agent: a turn from the terminal is running (${agent}) — "${shown}". Ctrl+C in the terminal does not `
+  host.notice(`Hiro Agent: a request from the terminal is running (${agent}) — "${shown}". Ctrl+C in the terminal does not `
               + `stop it; it stops after ${timeout} s at the latest.`);
 
   const refused: string[] = [];
@@ -134,7 +134,7 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
         void => {
       if (timer !== undefined) clearTimeout(timer);
       const seconds = Math.round((Date.now() - started) / 100) / 10;
-      host.notice(`Hiro Agent: the turn from the terminal ${stopped ? `was stopped after ${timeout} s` : result.ok ? "is done"
+      host.notice(`Hiro Agent: the request from the terminal ${stopped ? `was stopped after ${timeout} s` : result.ok ? "is done"
                    : "failed"}${kept ? ` — saved as "${session}"` : ""}.`);
       resolve({ ...result, agent, connection, session, refused, unasked, stopped, seconds, kept, calls });
     };
@@ -154,7 +154,7 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
       },
       onConfirmRequest: (callId, name, input) => {
         if (!allowDestructive) {
-          refused.push(`${name}: refused — a turn from the terminal needs allow=destructive for it`);
+          refused.push(`${name}: refused — a request from the terminal needs allow=destructive for it`);
           host.confirm(turn, callId, false);
         } else if (host.developer()) {
           // Unattended, as agent:tool's confirm flag — and said in the reply, so it never passes unnoticed

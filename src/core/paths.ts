@@ -9,8 +9,38 @@
 /** Obsidian's own configuration. No tool reaches it. */
 export const OBSIDIAN_DIR = ".obsidian";
 
-/** What an agent may do is decided in these; the model's tools may not write there (#60). */
-export const DEFINITION_DIRS: Record<string, string> = { ".agents": "agent definitions", ".tools": "tool definitions" };
+/**
+ * Folders no tool reaches, and what each holds: Obsidian's configuration; the definitions that decide what an agent
+ * may do (#60); the saved conversations, which are read back into the model's context; the profile that goes into
+ * every agent's prompt (#135). The plugin's own code reaches them through the vault port, not through a tool.
+ */
+const PROTECTED: [string, string][] = [
+  [OBSIDIAN_DIR, "holds Obsidian's own configuration"],
+  [".agents", "holds agent definitions"],
+  [".tools", "holds tool definitions"],
+  [".sessions", "holds saved conversations"],
+  [".memory", "holds the profile the agent keeps of the user"],
+];
+
+/**
+ * Paths protected on top of those, set for this vault: a renamed config folder, a profile kept elsewhere. Module
+ * state on purpose (#181): each vault window runs its own copy of the plugin, and every toolset sets it from the
+ * same settings before its tools run, so it cannot mix two vaults; passing it through every path check would not
+ * make that safer.
+ */
+let extraProtected: [string, string][] = [];
+
+/**
+ * Protect Obsidian's config folder when the vault renamed it (`app.vault.configDir`), and the user profile when
+ * memory keeps it outside `.memory/` (#135). Called with this vault's values before tools run.
+ */
+export function protectVaultPaths(paths: { configDir?: string; profilePath?: string }): void {
+  extraProtected = [];
+  const configDir = paths.configDir ? normalize(paths.configDir) : null;
+  if (configDir) extraProtected.push([configDir, "holds Obsidian's own configuration"]);
+  const profile = paths.profilePath ? normalize(paths.profilePath) : null;
+  if (profile) extraProtected.push([profile, "is the profile the agent keeps of the user"]);
+}
 
 const INVALID_NAME_CHARS = new Set(['<', '>', ':', '"', '|', '?', '*']);
 const RESERVED_NAMES = new Set(["CON", "PRN", "AUX", "NUL",
@@ -86,15 +116,16 @@ export function scopePrompt(scope: string[] | null): string {
 export function safeResolve(relativePath: string, scope: string[] | null = null): string {
   const resolved = normalize(relativePath);
   if (resolved === null) throw new PathError(`Path escape attempt blocked: '${relativePath}'`);
-  if (within(resolved, OBSIDIAN_DIR)) {
-    throw new PathError(`'${OBSIDIAN_DIR}' holds Obsidian's own configuration and is not writable by tools`);
-  }
-  for (const [folder, holds] of Object.entries(DEFINITION_DIRS)) {
-    if (within(resolved, folder)) throw new PathError(`'${folder}' holds ${holds} and is not writable by tools`);
+  // Without regard to letter case: on Windows and macOS '.Agents' is '.agents' (#135)
+  for (const [folder, holds] of [...PROTECTED, ...extraProtected]) {
+    if (within(resolved.toLowerCase(), folder.toLowerCase())) {
+      throw new PathError(`'${folder}' ${holds} and is not reachable by tools`);
+    }
   }
   if (scope && scope.length) {
-    const allowed = scope.map((s) => normalize(s.replace(/\/+$/, "")) ?? "");
-    if (!allowed.some((d) => resolved === d || resolved.startsWith(`${d}/`) || d === "")) {
+    // A folder that names the vault itself or leaves it ('.', '..', '/') allows nothing, rather than everything (#135)
+    const allowed = scope.map((s) => normalize(s.replace(/\/+$/, ""))).filter((d): d is string => Boolean(d));
+    if (!allowed.some((d) => resolved === d || resolved.startsWith(`${d}/`))) {
       const shown = scope.map((s) => `'${s}'`).join(", ");
       throw new PathError(`Path '${relativePath}' is outside this agent's allowed scope (${shown})`);
     }

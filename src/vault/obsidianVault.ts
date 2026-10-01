@@ -49,7 +49,12 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
   await app.vault.createFolder(path);
 }
 
-export function obsidianVault(app: App): VaultPort {
+/**
+ * The VaultPort on *app*'s vault. Its writes go to the undo journal while a turn records them; with `record: false`
+ * they never do — the settings' own writes (an agent saved in the Agents tab) are not the agent's changes (#177).
+ */
+export function obsidianVault(app: App, options: { record?: boolean } = {}): VaultPort {
+  const record = (): ((change: Change) => void) | null => (options.record === false ? null : recorder);
   const adapter = app.vault.adapter;
 
   /**
@@ -88,7 +93,7 @@ export function obsidianVault(app: App): VaultPort {
 
   /** A file's text when the journal needs it, null when there is no file. */
   const before = async (path: string): Promise<string | null> => {
-    if (!recorder) return null;
+    if (!record()) return null;
     const stat = await adapter.stat(normalizePath(path));
     if (stat?.type !== "file") return null;
     const file = app.vault.getAbstractFileByPath(normalizePath(path));
@@ -127,7 +132,7 @@ export function obsidianVault(app: App): VaultPort {
     write: async (path, text) => {
       const previous = await before(path);
       await write(path, text);
-      recorder?.({ op: previous === null ? "create" : "modify", path: normalizePath(path), before: previous, after: text });
+      record()?.({ op: previous === null ? "create" : "modify", path: normalizePath(path), before: previous, after: text });
     },
     remove: async (path) => {
       writes += 1;
@@ -137,7 +142,7 @@ export function obsidianVault(app: App): VaultPort {
       if (file instanceof TFile) await app.vault.delete(file, true);
       // Not in the index: a file in a dot folder
       else if (await adapter.exists(normalized)) await adapter.remove(normalized);
-      recorder?.({ op: "delete", path: normalized, before: previous, after: null });
+      record()?.({ op: "delete", path: normalized, before: previous, after: null });
     },
     move: async (from, to) => {
       writes += 1;
@@ -147,7 +152,8 @@ export function obsidianVault(app: App): VaultPort {
       if (source instanceof TFile) await app.fileManager.renameFile(source, target);
       // Not in the index: a file in a dot folder
       else await adapter.rename(normalizePath(from), target);
-      if (recorder) recorder({ op: "move", path: normalizePath(from), before: null, after: await before(target), movedTo: target });
+      const note = record();
+      if (note) note({ op: "move", path: normalizePath(from), before: null, after: await before(target), movedTo: target });
     },
   };
 }

@@ -12,23 +12,31 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
+import { messageOf } from "../core/errors";
 import type { ContentPart } from "../core/llm/openaiChat";
 import { programEnv } from "../core/programPath";
 import type { Tool, ToolSpec } from "../core/tools/tool";
-import {
-  commandLine, McpConfigError, passesFilter, resolveSpec, TOOL_SEPARATOR, type McpServerSpec,
-} from "./servers";
+import { commandLine, McpConfigError, type McpServerSpec, needsApproval, passesFilter, resolveSpec, TOOL_SEPARATOR } from "./servers";
 
 /** What the manager needs from the plugin. */
 export interface McpHost {
   vaultPath(): string;
-  /** A Secrets binding's key; the keychain is the only place a `${NAME}` is read from. */
+  /** A keychain entry's value by its name; the keychain is the only place a `${name}` is read from (#147). */
   keychain(name: string): string | undefined;
-  /** Whether this exact stdio server was approved on this device (servers.fingerprint). */
+  /**
+   * Whether this exact server was approved on this device (servers.fingerprint): a stdio server, and an http server
+   * whose URL or headers send a keychain key (#136). Asked only for servers that need it (needsApproval).
+   */
   approved(spec: McpServerSpec): boolean;
   log(line: string): void;
   fetch: (url: string | URL, init?: RequestInit) => Promise<Response>;
   version: string;
+  /**
+   * The tools each server offered when it was last listed, kept on this device (#178): the Agents tab draws its
+   * switches from them without starting a server. Not given: nothing is kept between sessions.
+   */
+  rememberedTools?(): Record<string, McpTool[]>;
+  rememberTools?(server: string, tools: McpTool[]): void;
 }
 
 /** A tool as a server offers it, before it is named for the agent. */
@@ -37,13 +45,19 @@ export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  /** The server says the tool destroys or overwrites (annotations.destructiveHint): the user is asked first. */
+  /**
+   * The user is asked first unless the server says the tool only reads, or that it destroys nothing: the MCP
+   * specification's defaults are readOnlyHint false and destructiveHint true, so a tool without annotations asks
+   * (#138, security review 2026-09-30).
+   */
   destructive: boolean;
 }
 
 export class McpNotApproved extends Error {
   constructor(readonly spec: McpServerSpec) {
-    super(`MCP server '${spec.name}' runs a program on this computer and has not been approved on this device. `
+    const what = spec.transport === "stdio" ? "runs a program on this computer"
+      : `sends a key from this device's keychain to ${spec.url}`;
+    super(`MCP server '${spec.name}' ${what} and has not been approved on this device. `
       + "Approve it under Settings → Hiro Agent → Features → MCP servers.");
     this.name = "McpNotApproved";
   }
@@ -62,8 +76,28 @@ const STDERR_KEPT = 2_000;
 
 export class McpManager {
   private readonly connections = new Map<string, Promise<Connection>>();
+  /** What each server offered when it was last listed, before its filter (#178). */
+  private readonly listed: Map<string, McpTool[]>;
 
-  constructor(private readonly host: McpHost) {}
+  constructor(private readonly host: McpHost) {
+    let remembered: Record<string, McpTool[]> = {};
+    try {
+      remembered = host.rememberedTools?.() ?? {};
+    } catch {
+      remembered = {};  // unreadable: the next listing fills it again
+    }
+    this.listed = new Map(Object.entries(remembered).filter(([, tools]) => Array.isArray(tools)));
+  }
+
+  /**
+   * The tools of *specs* as the agent's, from each server's last listing — without connecting to anything (#178).
+   * A server not listed yet on this device has none here; a turn or a test lists it.
+   */
+  knownTools(specs: McpServerSpec[]): Tool[] {
+    return specs.flatMap((spec) => (this.listed.get(spec.name) ?? [])
+      .filter((tool) => passesFilter(spec, tool.name))
+      .map((tool) => this.asTool(spec, { ...tool, server: spec.name })));
+  }
 
   /** The server's tools, as it names them, after its `tools_filter`. Connects when not connected. */
   async tools(spec: McpServerSpec): Promise<McpTool[]> {
@@ -77,11 +111,13 @@ export class McpManager {
           const hints = tool.annotations ?? {};
           listed.push({ server: spec.name, name: tool.name, description: tool.description ?? "",
                         inputSchema: tool.inputSchema as Record<string, unknown>,
-                        destructive: hints.destructiveHint === true && hints.readOnlyHint !== true });
+                        destructive: hints.readOnlyHint !== true && hints.destructiveHint !== false });
         }
         cursor = page.nextCursor;
       } while (cursor);
       connection.tools = listed;
+      this.listed.set(spec.name, listed);
+      this.host.rememberTools?.(spec.name, listed);
     }
     return connection.tools.filter((tool) => passesFilter(spec, tool.name));
   }
@@ -166,7 +202,9 @@ export class McpManager {
   }
 
   private async connect(spec: McpServerSpec, key: string): Promise<Connection> {
-    if (spec.transport === "stdio" && !this.host.approved(spec)) throw new McpNotApproved(spec);
+    // Checked here, where the server is used, for every kind that needs it: an http server naming a keychain key
+    // would otherwise send it wherever settings that arrived by sync point it (#170)
+    if (needsApproval(spec) && !this.host.approved(spec)) throw new McpNotApproved(spec);
     const resolved = resolveSpec(spec, this.host.vaultPath(), (name) => this.host.keychain(name));
     let transport: Transport;
     let stderr = "";
@@ -176,7 +214,7 @@ export class McpManager {
       this.host.log(`MCP: starting '${spec.name}': ${commandLine(spec)}`);
       // The SDK's safe environment (PATH, HOME, …) plus the server's own env, nothing else of Obsidian's; on macOS
       // PATH gains Homebrew's folders (#124), where npx and the node it runs usually are
-      const path = programEnv()?.PATH;
+      const path = programEnv(process.env, process.platform)?.PATH;
       const env = path && !("PATH" in resolved.env) ? { PATH: path, ...resolved.env } : resolved.env;
       const stdio = new StdioClientTransport({
         command: resolved.command, args: resolved.args, env, cwd: this.host.vaultPath() || undefined,
@@ -203,7 +241,7 @@ export class McpManager {
     } catch (error) {
       await client.close().catch(() => undefined);
       const said = stderr.trim().split("\n").slice(-3).join(" ").trim();
-      throw new Error(`MCP server '${spec.name}' did not start: ${(error as Error).message}${said ? ` (${said})` : ""}`);
+      throw new Error(`MCP server '${spec.name}' did not start: ${messageOf(error)}${said ? ` (${said})` : ""}`);
     }
     return { key, client, tools: null };
   }

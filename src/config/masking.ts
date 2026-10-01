@@ -5,6 +5,8 @@
  * is never stored as the new value. `${OPENAI_API_KEY}` is a reference, not a secret: it is shown as it is.
  */
 
+import { holdsASecret } from "../core/redact";
+
 // `authorization`: an MCP server's header (#87) — Python had no header a key could hide in
 const SECRET_HINTS = ["api_key", "apikey", "secret", "token", "password", "passwd", "authorization"];
 const REFERENCE = /\$\{[^}]+\}/g;
@@ -83,6 +85,10 @@ export function literalSecrets(values: unknown): string[] {
       const where = path ? `${path}.${key}` : key;
       if (!Array.isArray(node) && isSecretKey(key) && typeof value === "string") {
         if (isLiteralSecret(value)) found.push(where);
+      } else if (typeof value === "string") {
+        // Anywhere else a key has a recognisable shape: an MCP server's arguments (--api-key sk-…), an env entry
+        // under another name, a URL's query (?key=AIza…) — refused the same way (#138)
+        if (!isReference(value) && holdsASecret(value)) found.push(where);
       } else walk(value, where);
     }
   };

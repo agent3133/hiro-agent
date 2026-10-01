@@ -27,7 +27,7 @@ function which(name: string): string | null {
   if (/[\\/]/.test(name)) return isFile(name) ? name : null;
   const extensions = process.platform === "win32"
     ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").map((e) => e.toLowerCase())] : [""];
-  for (const folder of programPath(process.env.PATH).split(delimiter).filter(Boolean)) {
+  for (const folder of programPath(process.env.PATH, process.platform).split(delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = join(folder, name + extension);
       if (isFile(candidate)) return candidate;
@@ -41,7 +41,7 @@ function run(program: string, argument: string): Promise<ProgramCheck> {
   if (!resolved) return Promise.resolve({ ok: false, program, said: [], error: `${program} was not found — give its full path` });
   return new Promise((resolve) => {
     const child = execFile(resolved, [argument], { timeout: TIMEOUT_MS, windowsHide: true, encoding: "utf8",
-                                                   env: programEnv() },
+                                                   env: programEnv(process.env, process.platform) },
                            (error, stdout, stderr) => {
       if (error && (error as { killed?: boolean }).killed) {
         resolve({ ok: false, program: resolved, said: [], error: `it did not answer within ${TIMEOUT_MS / 1000} seconds` });

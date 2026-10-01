@@ -4,11 +4,12 @@ import type { ProbeAnswer } from "./connections";
 
 /**
  * GET a URL on the user's behalf, for "is anything there?" — llama-server detection and a connection's test.
- * `requestUrl`, like every call here, because the renderer's own fetch is blocked cross-origin. No credentials.
+ * `requestUrl`, like every call here, because the renderer's own fetch is blocked cross-origin. Credentials only
+ * when a test on this device passes them (#149).
  */
-export async function probe(url: string): Promise<ProbeAnswer | null> {
+export async function probe(url: string, headers?: Record<string, string>): Promise<ProbeAnswer | null> {
   try {
-    const response = await requestUrl({ url, method: "GET", throw: false });
+    const response = await requestUrl({ url, method: "GET", throw: false, headers });
     let body: unknown = response.text;
     try {
       body = JSON.parse(response.text);

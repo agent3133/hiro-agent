@@ -27,7 +27,7 @@ export class PluginBackend {
 
   constructor(private readonly store: ConfigStore, private readonly catalog: AgentCatalog,
               private readonly programs: Programs, version: string, vaultName: string) {
-    this.ready = { protocol: 0, version, vault: vaultName, model: "", agents: [], profiles: [], defaultProfile: "" };
+    this.ready = { version, vault: vaultName, agents: [], profiles: [], defaultProfile: "" };
   }
 
   /** The agents and connections as the chat header lists them; call refresh() after they change. */
@@ -35,23 +35,11 @@ export class PluginBackend {
     return this.ready;
   }
 
-  connected(): boolean {
-    return true;
-  }
-
   async refresh(): Promise<ReadyInfo> {
     const values = this.store.values();
     this.ready = { ...this.ready, agents: await this.catalog.summaries(), profiles: profileSummaries(values),
                    defaultProfile: defaultProfileName(values) };
     return this.ready;
-  }
-
-  async refreshAgents(): Promise<void> {
-    await this.refresh();
-  }
-
-  async refreshProfiles(): Promise<void> {
-    await this.refresh();
   }
 
   config(): Promise<ConfigDocument> {

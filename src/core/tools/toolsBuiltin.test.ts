@@ -71,7 +71,8 @@ describe("test_tools_builtin.py", () => {
   it("test_search_vault_no_match", async () => {
     const vault = await makeVault({ "note.md": "completely unrelated content" });
     const result = await vault.tool("search_vault").run({ query: "zyxwvutsrqponmlkji" });
-    expect(result.trim()).toBe("");
+    // Python answered "": in words since #160, as an empty answer reads to a small model as a broken tool
+    expect(result).toBe("No notes contain 'zyxwvutsrqponmlkji'. Try fewer or other words, or find_notes to search by name.");
   });
 
   it("test_list_notes_subdirectory", async () => {

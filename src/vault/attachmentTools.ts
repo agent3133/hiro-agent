@@ -20,6 +20,11 @@ const IMAGE_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
   tiff: "image/tiff", tif: "image/tiff",
 };
+/** What a recording or video answers while the audio programs wait for this device's approval (#136). */
+const PROGRAMS_NOT_APPROVED = "Error: the audio programs set in Settings → Hiro Agent → Features → Audio "
+  + "transcription are not approved on this device (they may have come from another device's settings), so "
+  + "nothing was run. Tell the user to check them there and approve them.";
+
 /** 150 dpi balances legibility against the tokens a page costs (Python's _RENDER_DPI). */
 const RENDER_DPI = 150;
 
@@ -86,6 +91,7 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
 
   /** A video's frames, with the transcript of its sound when there is one and audio is on — Python's order. */
   const video = async (file: TFile, shown: string): Promise<ContentPart[] | string> => {
+    if (!audio.approved) return PROGRAMS_NOT_APPROVED;
     if (!media) return "Error: videos can be read only where the vault is on disk (desktop)";
     const sampled = await media.frames(file.path);
     const heard = audio.enabled && (await media.hasAudio(file.path))
@@ -102,7 +108,9 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
     const { file, error } = find(path);
     if (!file) return error;
     const extension = file.extension.toLowerCase();
-    if (AUDIO_EXTENSIONS.includes(extension) || (extension === "webm" && media && (await isAudioFile(file.path, media)))) {
+    const programs = audio.approved ? media : null;
+    if (AUDIO_EXTENSIONS.includes(extension) || (extension === "webm" && programs && (await isAudioFile(file.path, programs)))) {
+      if (!audio.approved) return PROGRAMS_NOT_APPROVED;
       if (!media) return "Error: recordings can be transcribed only where the vault is on disk (desktop)";
       return recordingAnswer(vault, file.path, media, audio.enabled, scope);
     }

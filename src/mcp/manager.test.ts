@@ -42,7 +42,7 @@ describe("a stdio server", () => {
     const { tools, failures } = await manager(host).agentTools([stdio()]);
     expect(failures).toEqual([]);
     expect(tools.map((tool) => tool.name).sort())
-      .toEqual(["local__echo", "local__environment", "local__fail", "local__picture", "local__wipe"]);
+      .toEqual(["local__add", "local__echo", "local__environment", "local__fail", "local__look", "local__picture", "local__wipe"]);
     const echo = tools.find((tool) => tool.name === "local__echo")!;
     expect(echo.parameters.required).toEqual(["text"]);
     expect(await echo.run({ text: "hi" })).toBe("echo: hi");
@@ -82,7 +82,7 @@ describe("a stdio server", () => {
   it("does not start with a reference the keychain has no key for", async () => {
     const { host, log } = hostWith({});
     await expect(manager(host).tools(stdio({ env: { TEST_TOKEN: "${MISSING}" } })))
-      .rejects.toThrow("local's env TEST_TOKEN names ${MISSING}, which has no key in Settings → Hiro Agent → Secrets");
+      .rejects.toThrow("local's env TEST_TOKEN names ${MISSING}, which is not in Obsidian's keychain on this device (Settings → Keychain)");
     expect(log).toEqual([]);
   });
 
@@ -98,11 +98,14 @@ describe("a stdio server", () => {
     expect(log).toEqual([]);
   });
 
-  it("marks a tool the server calls destructive, so the user is asked", async () => {
+  it("asks first unless the server says the tool only reads or destroys nothing — the MCP defaults (#138)", async () => {
     const { host } = hostWith();
     const { tools } = await manager(host).agentTools([stdio()]);
-    expect(tools.find((tool) => tool.name === "local__wipe")!.destructive).toBe(true);
-    expect(tools.find((tool) => tool.name === "local__echo")!.destructive).toBe(false);
+    const destructive = (name: string) => tools.find((tool) => tool.name === `local__${name}`)!.destructive;
+    expect(destructive("wipe")).toBe(true);
+    expect(destructive("echo")).toBe(true);   // no annotations: the specification's destructiveHint default, true
+    expect(destructive("look")).toBe(false);  // readOnlyHint
+    expect(destructive("add")).toBe(false);   // destructiveHint false
   }, 30_000);
 
   it("is started again after its settings change, and not after a change elsewhere", async () => {
@@ -151,10 +154,64 @@ describe("an HTTP server", () => {
     expect(tools.some((tool) => tool.name === "local__echo")).toBe(true);
   }, 30_000);
 
-  it("needs no approval: it runs nothing on this computer", async () => {
-    const { host } = hostWith({ REMOTE_TOKEN: "secret-token" }, () => false);
+  it("sending no key, needs no approval: it runs nothing on this computer and sends nothing of this device's", async () => {
+    const { host } = hostWith({}, () => false);
+    // The test server refuses a request without its token, so a start that fails for that reason is a start
+    const { failures } = await manager(host).agentTools([http({})]);
+    expect(failures.join("")).not.toContain("has not been approved");
+  }, 30_000);
+
+  it("sending a keychain key, is not connected before this device approves it, and the key is not sent (#170)", async () => {
+    const { host, log } = hostWith({ REMOTE_TOKEN: "secret-token" }, () => false);
+    const made = manager(host);
+    await expect(made.tools(http({ Authorization: "Bearer ${REMOTE_TOKEN}" }))).rejects.toBeInstanceOf(McpNotApproved);
+    const { tools, failures } = await made.agentTools([http({ Authorization: "Bearer ${REMOTE_TOKEN}" })]);
+    expect(tools).toEqual([]);
+    expect(failures[0]).toContain(`sends a key from this device's keychain to ${served.url} and has not been approved`);
+    expect(log.filter((line) => line.startsWith("MCP: connecting"))).toEqual([]);
+  }, 30_000);
+
+  it("sending a keychain key, is connected once approved", async () => {
+    const { host } = hostWith({ REMOTE_TOKEN: "secret-token" }, (spec) => spec.name === "remote");
     expect((await manager(host).agentTools([http({ Authorization: "Bearer ${REMOTE_TOKEN}" })])).failures).toEqual([]);
   }, 30_000);
+});
+
+describe("the tools the Agents tab draws (#178)", () => {
+  it("come from the last listing, and asking for them connects to nothing", async () => {
+    const { host, log } = hostWith();
+    const made = manager(host);
+    expect(made.knownTools([stdio()])).toEqual([]);
+    expect(log).toEqual([]);  // nothing was started to answer
+    await made.tools(stdio());
+    const names = made.knownTools([stdio()]).map((tool) => tool.name);
+    expect(names).toContain("local__echo");
+    expect(log.filter((line) => line.startsWith("MCP: starting"))).toHaveLength(1);
+  }, 30_000);
+
+  it("are remembered on this device, so a restart lists them without starting the server", async () => {
+    const kept: Record<string, unknown> = {};
+    const { host } = hostWith();
+    host.rememberTools = (server, tools) => { kept[server] = tools; };
+    await manager(host).tools(stdio());
+    const { host: later, log } = hostWith();
+    later.rememberedTools = () => kept as never;
+    expect(manager(later).knownTools([stdio()]).map((tool) => tool.name)).toContain("local__echo");
+    expect(log).toEqual([]);
+  }, 30_000);
+
+  it("follow the server's filter as it is now", async () => {
+    const { host } = hostWith();
+    const made = manager(host);
+    await made.tools(stdio());
+    expect(made.knownTools([stdio({ tools_filter: ["echo"] })]).map((tool) => tool.name)).toEqual(["local__echo"]);
+  }, 30_000);
+
+  it("survive a remembered list that is not a list", () => {
+    const { host } = hostWith();
+    host.rememberedTools = () => ({ local: "broken" }) as never;
+    expect(manager(host).knownTools([stdio()])).toEqual([]);
+  });
 });
 
 describe("resultContent", () => {

@@ -16,7 +16,7 @@ describe("literalSecrets", () => {
 });
 
 describe("resolveConnection's key: from the keychain only", () => {
-  // *keychain* stands for the Secrets bindings (main.ts's secretValue), which read nothing else
+  // *keychain* stands for Obsidian's keychain (main.ts's secretValue), which is read and nothing else
   const keychain = (vars: Record<string, string>) => (name: string): string | undefined => vars[name];
 
   it("reads the key a ${VAR} reference names", () => {
@@ -37,5 +37,29 @@ describe("resolveConnection's key: from the keychain only", () => {
   it("has no key when the reference names nothing in the keychain", () => {
     expect(resolveConnection({ llm: { provider: "openai", api_key: "${NOT_BOUND}" } }, "", keychain({})).apiKey)
       .toBeUndefined();
+  });
+});
+
+describe("literalSecrets beyond the credential fields (#138)", () => {
+  // Joined at runtime, so no file holds a whole token for secret scanners to flag
+  const fake = (...parts: string[]): string => parts.join("");
+  const KEY = fake("sk-", "abcdefghijklmnopqrstuvwxyz0123456789");
+  const GOOGLE = fake("AIza", "SyD-1234567890abcdefghijklmnopqrstuvw");
+
+  it("finds a key written into an MCP server's arguments, env under another name, or URL", () => {
+    const values = { mcp_servers: {
+      local: { transport: "stdio", command: "npx", args: ["-y", "server", "--api-key", KEY], env: { OPENAI_KEY: KEY } },
+      remote: { transport: "http", url: `https://maps.example/mcp?key=${GOOGLE}` },
+    } };
+    expect(literalSecrets(values)).toEqual(["mcp_servers.local.args.3", "mcp_servers.local.env.OPENAI_KEY",
+                                            "mcp_servers.remote.url"]);
+  });
+
+  it("leaves references and ordinary values alone", () => {
+    const values = { mcp_servers: { local: { command: "npx", args: ["-y", "server", "--api-key", "${SERVER_KEY}"],
+                                             env: { MODE: "fast", OPENAI_KEY: "${OPENAI_API_KEY}" } },
+                                    remote: { url: "https://maps.example/mcp?region=eu" } },
+                     llm: { model: "gpt-5", base_url: "https://api.example.com/v1" } };
+    expect(literalSecrets(values)).toEqual([]);
   });
 });

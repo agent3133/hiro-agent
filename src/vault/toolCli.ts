@@ -8,7 +8,7 @@
 
 import type { App, CliData, Plugin } from "obsidian";
 
-import { confirmArgs, toolErrorText } from "../core/agentLoop";
+import { asksFirst, confirmArgs, toolErrorText } from "../core/agentLoop";
 import { obsidianToolset, type ToolsetOptions } from "./toolset";
 
 export function registerToolCli(plugin: Plugin, app: App, options: () => Promise<ToolsetOptions>): void {
@@ -33,7 +33,7 @@ async function runTool(app: App, params: CliData, options: () => Promise<Toolset
     return toolErrorText(error);
   }
   try {
-    if (tool.destructive) {
+    if (await asksFirst(tool, args)) {
       tool.validate?.(args);
       if (params.confirm !== "true") {
         const asked = await (tool.confirmArgs?.(args) ?? Promise.resolve(confirmArgs(args)));

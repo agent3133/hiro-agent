@@ -10,18 +10,23 @@
 
 import { FileSystemAdapter, Notice, type App } from "obsidian";
 
-import type { ReadyInfo, SessionSummary, TurnChanges, TurnHandlers, TurnSummary, UndoResult } from "../api/types";
+import type { ReadyInfo, TurnChanges, TurnHandlers, TurnSummary, UndoResult } from "../api/types";
 import type { AgentCatalog } from "../config/agents";
 import type { PluginBackend } from "../config/backend";
-import { detectLlamaCpp, hasConnection, NO_CONNECTION, profileSummaries, resolveConnection } from "../config/connections";
+import { detectConnection, type ServerCache, hasConnection, NO_CONNECTION, profileSummaries, resolveConnection, writtenOutKey }
+  from "../config/connections";
+import { connectionApproval, type DeviceApprovals } from "../config/deviceApprovals";
+import { featurePrompt } from "../config/features";
 import { runTurn, turnFailure, type Confirm } from "../core/agentLoop";
+import { compactHistory, dueForCompaction, estimateMessages, KEEP_SHARE, recentThatFit, retryAfterCompaction,
+         splitHistory, summariseLimit } from "../core/compaction";
+import { serially } from "../core/serial";
 import { Journal, type Turn } from "../core/journal";
 import { OpenAiChat, type ChatModel } from "../core/llm/openaiChat";
 import { scopePrompt } from "../core/paths";
 import { promptContext, renderPrompt } from "../core/prompt";
 import {
-  compactSession, deleteSession, listSessions, loadSession, saveSession, sessionMeta, sanitiseName,
-  type ConnectionChange, type SessionMessage,
+  compactSession, type ConnectionChange, deleteSession, listSessions, loadSession, sanitiseName, saveSession, type SessionMessage, sessionMeta, type SessionSummary,
 } from "../core/sessions";
 import { readUserProfile } from "../core/tools/memoryTools";
 import type { Tool } from "../core/tools/tool";
@@ -36,14 +41,17 @@ const DEFAULT_MAX_ITERATIONS = 50;
 /** How long a confirmation waits for an answer before it counts as a refusal — the runtime's CONFIRM_TIMEOUT_S. */
 const CONFIRM_TIMEOUT_MS = 300_000;
 /** A reopened conversation brings back the newest messages within this share of the context window. */
-const HISTORY_SHARE = 0.2;
+const HISTORY_SHARE = KEEP_SHARE;
 /**
  * One tool result may fill at most this share of the context window, counted at three characters a token — few
  * enough that a page in any language fits. A long web page is cut rather than ending the turn.
  */
 const TOOL_RESULT_SHARE = 0.25;
 const CHARS_PER_TOKEN = 3;
-/** Conversations longer than this many exchanges are summarised after the turn (AgentSession.save_session). */
+/**
+ * Kept conversations longer than this many exchanges are summarised after the answer whatever their size, so the
+ * note does not grow without end (AgentSession.save_session). Mostly, size in the window decides first (#154).
+ */
 const COMPACT_AFTER_EXCHANGES = 50;
 
 interface TurnOptions {
@@ -77,6 +85,8 @@ export interface InProcessSource {
   fetchJson(url: string): Promise<unknown>;
   /** The MCP servers' connections (#87). */
   mcp: McpManager;
+  /** What this device approved of what the synced settings send keys to or run (#136). */
+  deviceApprovals: DeviceApprovals;
   /** A line for the plugin's log (the "Show the agent's log" command); the plugin writes nothing to the console. */
   log(line: string): void;
 }
@@ -91,6 +101,11 @@ export function withContext(message: string, context: Record<string, unknown> = 
 
 export class InProcessAgent {
   private readonly running = new Map<string, AbortController>();
+  /**
+   * Turns run one at a time (#177): they share one undo journal, and a turn from the terminal starting beside the
+   * chat's would close the chat's journal entry early and take its later changes as its own. A later turn waits.
+   */
+  private readonly oneAtATime = serially();
   /** Open conversations by session name; "" is the one that is not kept. */
   private readonly conversations = new Map<string, Conversation>();
   /** Confirmations waiting for the user, by call id, with the turn they belong to. */
@@ -98,7 +113,7 @@ export class InProcessAgent {
   private journal: Journal | null = null;
 
   /** What llama.cpp servers said about themselves, by server — asked once per run (resolve_llm_config). */
-  private readonly detected = new Map<string, { model?: string; contextWindow?: number; thinking?: boolean }>();
+  private readonly detected: ServerCache = new Map();
 
   constructor(private readonly app: App, private readonly source: InProcessSource,
               private readonly options: () => Promise<ToolsetOptions>) {}
@@ -108,8 +123,9 @@ export class InProcessAgent {
     return this.source.backend.info();
   }
 
+  /** For the conversations' notes: not recorded, as they are written after a turn and are not its changes (#177). */
   private get vault() {
-    return obsidianVault(this.app);
+    return obsidianVault(this.app, { record: false });
   }
 
   // -- turns ---------------------------------------------------------------------------------------------------
@@ -118,7 +134,11 @@ export class InProcessAgent {
     const id = crypto.randomUUID();
     const controller = new AbortController();
     this.running.set(id, controller);
-    void this.run(id, prompt, options, handlers, controller.signal)
+    void this.oneAtATime(async () => {
+      // Stopped while it waited: it never starts
+      controller.signal.throwIfAborted();
+      await this.run(id, prompt, options, handlers, controller.signal);
+    })
       .catch((error: unknown) => {
         // A turn stopped halfway is exactly the one you want back: close it in the journal and say what it changed
         const changed = this.closeTurn();
@@ -140,10 +160,6 @@ export class InProcessAgent {
     const waiting = this.pending.get(callId);
     this.pending.delete(callId);
     waiting?.answer(approved);
-  }
-
-  connected(): boolean {
-    return true;
   }
 
   /** Asks through the chat view's dialog, and waits; no answer in time, or a cancelled turn, is a refusal. */
@@ -174,14 +190,28 @@ export class InProcessAgent {
     // The chat's choice wins; an agent naming a connection that does not exist falls back to the default (runner.py)
     const known = profileSummaries(values).map((p) => p.name);
     const chosen = options.profile || (agent.llmProfile && known.includes(agent.llmProfile) ? agent.llmProfile : "");
-    const connection = await detectLlamaCpp(resolveConnection(values, chosen, this.source.env, {
+    const connection = await detectConnection(resolveConnection(values, chosen, this.source.env, {
       model: agent.model, temperature: agent.temperature, enableThinking: agent.enableThinking,
       samplingPreset: agent.samplingPreset,
     }), this.source.fetchJson, this.detected);
     if (!connection.baseUrl) throw new Error(`the connection '${connection.name || "llm"}' has no server address`);
-    if (!connection.model && connection.provider !== "llamacpp") {
-      throw new Error(`the connection '${connection.name || "llm"}' names no model. Set one under Settings → Hiro Agent `
-                      + "→ General → Connections.");
+    // A key written out in the settings is never used: say so, rather than pass on the server's 401 (#146)
+    if (!connection.server && writtenOutKey(values, connection.name)) {
+      throw new Error(`the connection '${connection.name || "llm"}' has its API key written out in the settings, and `
+        + "a key there is never used — keys come only from Obsidian's keychain. Put the key there (Settings → "
+        + "Keychain) and pick it as the connection's API key (Settings → Hiro Agent → Connections).");
+    }
+    // A key goes only where this device approved it to go: the address sits beside the key's name in settings that
+    // sync, so another device could have changed it (#136)
+    const keyApproval = connectionApproval(values, connection.name);
+    if (keyApproval && !this.source.deviceApprovals.approved(keyApproval)) {
+      throw new Error(`the connection '${connection.name || "llm"}' ${keyApproval.what}, which this device has not `
+        + "approved — the setting may have come from another device. Check it and approve it under Settings → "
+        + "Hiro Agent → Connections.");
+    }
+    if (!connection.model && connection.server !== "llama.cpp") {
+      throw new Error(`the connection '${connection.name || "llm"}' names no model, and its server lists none. Set `
+                      + "one under Settings → Hiro Agent → Connections.");
     }
     const model = connection.model;
     const profileName = connection.name;
@@ -195,7 +225,7 @@ export class InProcessAgent {
     if (wantsMcp(agent.tools, scoped)) {
       const { tools: offered, failures } = await this.source.mcp.agentTools(mcpServers(values));
       mcpTools = offered;
-      for (const failure of failures) new Notice(`Hiro Agent: an MCP server is left out of this turn — ${failure}`, 10_000);
+      for (const failure of failures) new Notice(`Hiro Agent: an MCP server is left out of this answer — ${failure}`, 10_000);
     }
     // Exactly the tools the agent lists, in its order — none when it lists none (assemble_tools, runner.py)
     const tools = assembleTools(agent.tools, ported, mcpTools, scoped);
@@ -203,7 +233,7 @@ export class InProcessAgent {
     const vaultPath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
     let { text: systemPrompt } = renderPrompt(agent.prompt, promptContext(vaultPath, agent.name, model));
     // A restricted agent is told it is, so a note outside its folders is "out of reach", not "does not exist"
-    systemPrompt += scopePrompt(agent.vaultScope) + mcpPrompt(tools);
+    systemPrompt += scopePrompt(agent.vaultScope) + mcpPrompt(tools) + featurePrompt(agent.tools, values);
     // What the agent knows about the user, when memory is on and meant for the prompt (runner.py)
     if (settings.memory?.inject) {
       const profileText = await readUserProfile(this.vault, settings.memory.profilePath, settings.memory.maxProfileTokens);
@@ -211,35 +241,68 @@ export class InProcessAgent {
     }
 
     const key = options.session || "";
-    const conversation = await this.conversation(key, connection.contextWindow, options.keep !== false);
+    const window = connection.contextWindow;
+    const conversation = await this.conversation(key, window, options.keep !== false);
     const llm: ChatModel = new OpenAiChat({
       baseUrl: connection.baseUrl, model, apiKey: connection.apiKey, temperature: connection.temperature,
       topP: connection.topP, topK: connection.topK, minP: connection.minP, presencePenalty: connection.presencePenalty,
       repetitionPenalty: connection.repetitionPenalty, maxTokens: connection.maxTokens,
     });
     const started = Date.now();
+    // Summarised by size in the window (#154): before the request when the history no longer fits well — another,
+    // smaller model chosen, say — and after the answer when the conversation has grown past the share
+    let compacted = 0;
+    const estimate = (): number => estimateMessages([{ content: systemPrompt }, ...conversation.loaded]);
+    // Each summary is told to the chat, which marks the place with a divider and shows the text on demand
+    const summarise = async (when: "before" | "after"): Promise<number> => {
+      const exchanges = await this.compact(conversation, llm, window);
+      const summary = splitHistory(conversation.loaded).summary;
+      if (exchanges && summary) handlers.onSummary?.(exchanges, summary, when);
+      return exchanges;
+    };
+    if (dueForCompaction(estimate(), window)) compacted += await summarise("before");
     this.journal?.begin(prompt);
-    const result = await runTurn({
+    let toolCalls = 0;
+    let peak = 0;
+    const attempt = (): ReturnType<typeof runTurn> => runTurn({
       model: llm, tools, systemPrompt, prompt: withContext(prompt, options.context),
       history: conversation.loaded,
       maxIterations: agent.maxIterations || DEFAULT_MAX_ITERATIONS,
       thinking: connection.enableThinking, signal, confirm: this.asker(turn, handlers),
-      maxToolResultChars: Math.floor(connection.contextWindow * TOOL_RESULT_SHARE * CHARS_PER_TOKEN),
+      maxToolResultChars: Math.floor(window * TOOL_RESULT_SHARE * CHARS_PER_TOKEN),
+      contextWindow: window,
       events: {
+        // The most the answer took along the way; the meter shows it only in its tooltip (#154)
+        onUsage: (tokens) => { peak = Math.max(peak, tokens); },
+        onSetAside: (total) => handlers.onSetAside?.(total),
         onToken: handlers.onToken,
         onThinking: handlers.onThinking,
-        onToolCall: (callId, name, input) => handlers.onToolCall({ callId, name, input }),
+        onToolCall: (callId, name, input) => {
+          toolCalls += 1;
+          handlers.onToolCall({ callId, name, input });
+        },
         onToolResult: handlers.onToolResult,
       },
     });
+    // The conversation outgrew the window before anything ran: summarised, and asked once more
+    const retried = await retryAfterCompaction(attempt, () => summarise("before"), () => toolCalls > 0);
+    const result = retried.result;
+    compacted += retried.compacted;
     // Closed before the conversation is saved: the session note is not one of the turn's changes
     const changed = this.closeTurn();
     conversation.loaded = result.history as SessionMessage[];
     conversation.last = { agent: agent.name, model, connection: profileName };
     await this.save(conversation);
-    const compacted = await this.compactIfDue(conversation, llm, connection.contextWindow);
+    // By what the next message carries — the questions and answers, not this answer's tool results, which are not
+    // kept: one answer that read many notes does not make the conversation long
+    if (conversation.pendingCompact || dueForCompaction(estimate(), window)) {
+      const summarised = await summarise("after");
+      compacted += summarised;
+    }
+    // What the next message carries, after any summary: the measure the summary goes by, so the meter and it agree
+    handlers.onContext?.(estimate(), window, true, peak);
     const seconds = Math.round((Date.now() - started) / 100) / 10;
-    handlers.onDone(result.reply, false, { tool_calls: result.toolCalls, seconds, in_plugin: true }, changed, compacted);
+    handlers.onDone(result.reply, false, { tool_calls: result.toolCalls, seconds }, changed, compacted);
   }
 
   /** Journal the vault's writes from now on, as the runtime's journal settings say (AgentSession.__aenter__). */
@@ -297,16 +360,26 @@ export class InProcessAgent {
   }
 
   /**
-   * Summarise the old part of a long kept conversation with the model that answered — `compact_if_due`. A failure
-   * is swallowed: a conversation that could not be summarised is still a conversation.
+   * Summarise the old part of a conversation with the model that answered — `compact_if_due`, by size since #154:
+   * the newest exchanges that fit in KEEP_SHARE of the window stay word for word. A kept conversation is summarised
+   * in its note and read back; one that is not kept, in memory. A failure is swallowed: a conversation that could
+   * not be summarised is still a conversation. Returns how many exchanges were summarised.
    */
-  private async compactIfDue(conversation: Conversation, llm: ChatModel, contextWindow: number): Promise<number> {
-    if (!conversation.name || !conversation.pendingCompact) return 0;
+  private async compact(conversation: Conversation, llm: ChatModel, contextWindow: number): Promise<number> {
     conversation.pendingCompact = false;
     try {
       const summarize = async (text: string): Promise<string> =>
         (await llm.complete({ messages: [{ role: "user", content: text }], tools: [], thinking: false }, {})).content;
-      const compacted = await compactSession(this.vault, conversation.name, summarize);
+      if (!conversation.name) {
+        const done = await compactHistory(conversation.loaded, summarize, contextWindow);
+        if (!done) return 0;
+        conversation.loaded = done.history;
+        return done.compacted;
+      }
+      const { pairs } = splitHistory([...conversation.unloaded, ...conversation.loaded]);
+      const keep = recentThatFit(pairs, Math.floor(contextWindow * KEEP_SHARE));
+      const compacted = await compactSession(this.vault, conversation.name, summarize, keep,
+                                             summariseLimit(contextWindow));
       // Without this, the next save writes the full history back and undoes the compaction
       if (compacted) await this.load(conversation, contextWindow);
       return compacted;
@@ -328,7 +401,8 @@ export class InProcessAgent {
 
   /** A conversation's messages and the connection that answered it last — as `GET /sessions/{name}`. */
   async session(name: string): Promise<{ messages: { role: string; content: string }[]; connection?: string;
-                                         model?: string; connection_exists?: boolean }> {
+                                         model?: string; connection_exists?: boolean;
+                                         summary?: { text: string; exchanges: number } }> {
     const messages = await loadSession(this.vault, name);
     if (!messages.length && !(await this.vault.isFile(`.sessions/${sanitiseName(name)}.md`))) {
       throw new Error(`no session '${name}'`);
@@ -336,10 +410,14 @@ export class InProcessAgent {
     const meta = await sessionMeta(this.vault, name);
     const connection = String(meta.connection ?? "");
     const profiles = profileSummaries(this.source.values());
+    // The summary is not a message: the chat shows it as a divider, its text on demand (#154)
+    const { summary } = splitHistory(messages);
     return {
-      messages: messages.map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content })),
+      messages: messages.filter((m) => m.role !== "system")
+        .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content })),
       connection, model: String(meta.model ?? ""),
       connection_exists: Boolean(connection) && profiles.some((p) => p.name === connection),
+      ...(summary !== null ? { summary: { text: summary, exchanges: Number(meta.compacted_exchanges ?? 0) } } : {}),
     };
   }
 
@@ -377,7 +455,7 @@ export class InProcessAgent {
 
   private found(id: string): Turn {
     const turn = this.journal?.find(id);
-    if (!turn) throw new Error("that turn is no longer in the journal");
+    if (!turn) throw new Error("what that answer changed is no longer kept for undo");
     return turn;
   }
 
@@ -396,7 +474,7 @@ export class InProcessAgent {
   async undoTurn(id: string): Promise<UndoResult> {
     const turn = this.found(id);
     if (turn.undone) {
-      return { ok: false, undone: true, restored: [], refused: [{ path: "", reason: "this turn has already been taken back" }] };
+      return { ok: false, undone: true, restored: [], refused: [{ path: "", reason: "what this answer changed is already undone" }] };
     }
     const result = await this.journal!.undo(turn, this.vault);
     return { ok: result.restored.length > 0 && !result.refused.length, undone: turn.undone, restored: result.restored,

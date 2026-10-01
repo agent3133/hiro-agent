@@ -96,7 +96,7 @@ describe("the servers in the settings", () => {
     const keychain = (name: string): string | undefined => ({ K: "secret" } as Record<string, string>)[name];
     expect(fillReferences("${vault_path}/x Bearer ${K}", "w", "C:/v", keychain)).toBe("C:/v/x Bearer secret");
     expect(() => fillReferences("${NONE}", "files's env TOKEN", "C:/v", keychain))
-      .toThrow("files's env TOKEN names ${NONE}, which has no key in Settings → Hiro Agent → Secrets");
+      .toThrow("files's env TOKEN names ${NONE}, which is not in Obsidian's keychain on this device (Settings → Keychain)");
   });
 });
 
@@ -106,11 +106,34 @@ describe("approvals", () => {
     return new McpApprovals(() => stored, (value) => { stored = value; });
   }
 
-  it("are needed by a stdio server, not by an http one", () => {
+  it("are needed by a stdio server, and by an http one that sends a key (#136)", () => {
     const made = approvals();
     expect(made.approved(SERVERS[0])).toBe(false);
-    expect(made.approved(SERVERS[1])).toBe(true);
+    expect(made.approved(SERVERS[1])).toBe(false);
     made.approve(SERVERS[0]);
+    made.approve(SERVERS[1]);
+    expect(made.approved(SERVERS[0])).toBe(true);
+    expect(made.approved(SERVERS[1])).toBe(true);
+  });
+
+  it("are not needed by an http server that sends no key", () => {
+    expect(approvals().approved({ ...SERVERS[1], headers: {} })).toBe(true);
+    expect(approvals().approved({ ...SERVERS[1], headers: { "X-Client": "hiro" } })).toBe(true);
+  });
+
+  it("hold for an http server's address and headers: another address is asked for again", () => {
+    const made = approvals();
+    made.approve(SERVERS[1]);
+    expect(made.approved({ ...SERVERS[1], url: "https://peer.example/mcp" })).toBe(false);
+    expect(made.approved({ ...SERVERS[1], headers: { Authorization: "Bearer ${OTHER}" } })).toBe(false);
+    expect(made.approved({ ...SERVERS[1], enabled: false })).toBe(true);
+  });
+
+  it("survive a corrupt stored entry", () => {
+    let stored: unknown = ["not json", "[\"x\"]"];
+    const made = new McpApprovals(() => stored, (value) => { stored = value; });
+    made.approve(SERVERS[0]);
+    made.revoke("x");
     expect(made.approved(SERVERS[0])).toBe(true);
   });
 

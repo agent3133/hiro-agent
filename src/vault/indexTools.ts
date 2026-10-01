@@ -19,8 +19,20 @@ const INDEX_SETTLE_MS = 400;
 /** Where the vault's own trash lives when the user keeps deleted files in the vault. */
 const TRASH = ".trash";
 
-/** The write count the index last caught up with — shared, as each turn (and each `agent:tool` call) builds its tools anew. */
+/**
+ * The write count the index last caught up with — module state on purpose (#181): each turn (and each `agent:tool`
+ * call) builds its tools anew, and this has to outlive them. One per vault window, as each runs its own plugin.
+ */
 let settledAt = 0;
+
+/** The longest list an index tool answers with (#160): more is cut, and the answer says how many it left out. */
+const MAX_LINES = 100;
+
+/** *lines* joined, at most MAX_LINES of them, with a note naming how many more there are. */
+function capped(lines: string[], what: string, narrow = "ask about fewer to see the rest"): string {
+  if (lines.length <= MAX_LINES) return lines.join("\n");
+  return `${lines.slice(0, MAX_LINES).join("\n")}\n[${lines.length - MAX_LINES} more ${what}; ${narrow}]`;
+}
 
 /** Give Obsidian a moment to index notes written since the last question — the index lags behind a write. */
 async function settle(): Promise<void> {
@@ -77,7 +89,10 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
         .filter(([, targets]) => Object.keys(targets).some((link) => stem(parseLinktext(link).path).toLowerCase() === wanted))
         .map(([source]) => source);
     }
-    return sources.filter(inScope).sort().join("\n");
+    // Said in words when there are none, and bounded when there are many (#160)
+    const linking = sources.filter(inScope).sort();
+    if (!linking.length) return `No notes link to '${note ?? path}'`;
+    return capped(linking, "notes");
   });
 
   const getOutlinks = defineTool("get_outlinks", async (args) => {
@@ -95,7 +110,8 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
       const destination = app.metadataCache.getFirstLinkpathDest(target, note!);
       found.push(destination ? destination.path : `${target} (unresolved)`);
     }
-    return [...new Set(found)].join("\n");
+    const unique = [...new Set(found)];
+    return unique.length ? unique.join("\n") : `No links in '${note}'`;
   });
 
   const listTasks = defineTool("list_tasks", async (args) => {
@@ -116,7 +132,7 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
         found.push(`${file.path}:${line + 1}: ${(lines[line] ?? "").trim()}`);
       }
     }
-    return found.join("\n") || "No tasks found";
+    return found.length ? capped(found, "tasks", "name a folder in path, or a status, to see fewer") : "No tasks found";
   });
 
   const noteOutline = defineTool("note_outline", async (args) => {
@@ -180,7 +196,8 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
       recordChange({ op: "delete", path: resolved, before: held, after: null });
       return `Deleted note at '${path}' permanently`;
     }
-    // Where "the trash" is, is the user's choice (Settings → Files and links → Deleted files)
+    // Where "the trash" is, is the user's choice (Settings → Files and links → Deleted files). `vault.getConfig` is
+    // not in the published API: read only, and without it the message names no place rather than failing (#173)
     const option = (app.vault as unknown as { getConfig?(key: string): unknown }).getConfig?.("trashOption");
     await app.fileManager.trashFile(target);
     recordChange({ op: "delete", path: resolved, before: held, after: null });

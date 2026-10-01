@@ -81,13 +81,22 @@ export function httpError(status: number, host: string, body: string): Error {
   const said = (error.message ?? "").replace(/\*{4,}/g, "…").slice(0, 300);
   if (status === 401 || status === 403) {
     return new Error(`${host} did not accept the API key (HTTP ${status}${said ? `: ${said}` : ""}). Check the key `
-      + "this connection names in Settings → Hiro Agent → Secrets.");
+      + "this connection names in Obsidian's keychain (Settings → Keychain).");
   }
   return serverError(error, `${host} answered HTTP ${status}${said ? `: ${said}` : ""}`);
 }
 
+/**
+ * How long a server may stay silent (#179): before its first byte — llama.cpp sends nothing while it reads a long
+ * prompt, which can take minutes on a small machine — and between two chunks once it has started.
+ */
+export const FIRST_BYTE_TIMEOUT_MS = 10 * 60_000;
+export const IDLE_TIMEOUT_MS = 2 * 60_000;
+
 /** The connection and the sampling settings Python's `_sampling_kwargs` sends (runner.py). */
 export interface LlmSettings {
+  /** Silence allowed before the first byte and between chunks; FIRST_BYTE_TIMEOUT_MS and IDLE_TIMEOUT_MS unless set. */
+  timeouts?: { firstByteMs: number; idleMs: number };
   baseUrl: string;
   model: string;
   apiKey?: string;
@@ -105,6 +114,8 @@ export interface ChatRequest {
   tools: ToolSchema[];
   /** llama.cpp's chat_template_kwargs.enable_thinking; left out when undefined. */
   thinking?: boolean;
+  /** The most tokens this answer may take, over the connection's own max_tokens: a gist is short (#154). */
+  maxTokens?: number;
 }
 
 export interface Completion {
@@ -112,6 +123,8 @@ export interface Completion {
   reasoning: string;
   toolCalls: ToolCallRequest[];
   finishReason: string | null;
+  /** Tokens the request and the answer took, when the server said (#151). */
+  usage?: { promptTokens: number; completionTokens: number };
 }
 
 export interface Deltas {
@@ -124,10 +137,14 @@ export interface ChatModel {
   complete(request: ChatRequest, deltas: Deltas, signal?: AbortSignal): Promise<Completion>;
 }
 
-/** The JSON body of a chat completion request. */
-export function requestBody(settings: LlmSettings, request: ChatRequest): Record<string, unknown> {
+/**
+ * The JSON body of a chat completion request. *streamUsage* asks for the tokens used in the stream's last chunk
+ * (OpenAI's `stream_options`), for the chat's context meter (#151).
+ */
+export function requestBody(settings: LlmSettings, request: ChatRequest, streamUsage = true): Record<string, unknown> {
   const body: Record<string, unknown> = { model: settings.model, messages: request.messages.map(wireMessage),
                                           stream: true };
+  if (streamUsage) body.stream_options = { include_usage: true };
   if (request.tools.length) {
     body.tools = request.tools.map((tool) => ({ type: "function", function: tool }));
   }
@@ -138,6 +155,7 @@ export function requestBody(settings: LlmSettings, request: ChatRequest): Record
     ["top_k", settings.topK], ["min_p", settings.minP], ["repetition_penalty", settings.repetitionPenalty],
   ];
   for (const [key, value] of optional) if (value !== undefined && value !== null) body[key] = value;
+  if (request.maxTokens) body.max_tokens = request.maxTokens;
   if (request.thinking !== undefined) body.chat_template_kwargs = { enable_thinking: request.thinking };
   return body;
 }
@@ -185,6 +203,7 @@ export class CompletionBuilder {
   private reasoning = "";
   private calls = new Map<number, ToolCallRequest>();
   private finishReason: string | null = null;
+  private usage?: { promptTokens: number; completionTokens: number };
   done = false;
 
   constructor(private readonly deltas: Deltas = {}) {}
@@ -195,8 +214,10 @@ export class CompletionBuilder {
       this.done = true;
       return;
     }
-    const chunk = JSON.parse(payload) as { choices?: ChunkChoice[]; error?: ServerError };
+    const chunk = JSON.parse(payload) as { choices?: ChunkChoice[]; error?: ServerError; usage?: ChunkUsage | null;
+                                           timings?: ChunkTimings };
     if (chunk.error) throw serverError(chunk.error, chunk.error.message ?? JSON.stringify(chunk.error));
+    this.takeUsage(chunk.usage, chunk.timings);
     for (const choice of chunk.choices ?? []) {
       const delta = choice.delta ?? {};
       if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
@@ -219,11 +240,35 @@ export class CompletionBuilder {
     }
   }
 
+  /** OpenAI's `usage`, or else llama.cpp's `timings` (sent without being asked): what the request took. */
+  private takeUsage(usage: ChunkUsage | null | undefined, timings: ChunkTimings | undefined): void {
+    if (usage && typeof usage.prompt_tokens === "number") {
+      this.usage = { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens ?? 0 };
+    } else if (!this.usage && timings && typeof timings.prompt_n === "number") {
+      this.usage = { promptTokens: timings.prompt_n + (timings.cache_n ?? 0), completionTokens: timings.predicted_n ?? 0 };
+    }
+  }
+
   result(): Completion {
     const toolCalls = [...this.calls.entries()].sort(([a], [b]) => a - b)
       .map(([index, call]) => ({ ...call, id: call.id || `call_${index}` }));
-    return { content: this.content, reasoning: this.reasoning, toolCalls, finishReason: this.finishReason };
+    const completion: Completion = { content: this.content, reasoning: this.reasoning, toolCalls,
+                                     finishReason: this.finishReason };
+    if (this.usage) completion.usage = this.usage;
+    return completion;
   }
+}
+
+interface ChunkUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+}
+
+/** llama.cpp's own counts: tokens processed now, taken from its cache, and generated. */
+interface ChunkTimings {
+  prompt_n?: number;
+  cache_n?: number;
+  predicted_n?: number;
 }
 
 interface ChunkChoice {
@@ -237,18 +282,33 @@ interface ChunkChoice {
 
 /** A ChatModel talking to an OpenAI-compatible server. */
 export class OpenAiChat implements ChatModel {
+  /** Whether to ask for usage in the stream; off for a server that refused `stream_options` once (#151). */
+  private streamUsage = true;
+
   constructor(private readonly settings: LlmSettings) {}
 
   complete(request: ChatRequest, deltas: Deltas, signal?: AbortSignal): Promise<Completion> {
     const url = new URL(`${this.settings.baseUrl.replace(/\/+$/, "")}/chat/completions`);
-    const body = JSON.stringify(requestBody(this.settings, request));
+    const asked = this.streamUsage;
+    const body = JSON.stringify(requestBody(this.settings, request, asked));
     const transport = url.protocol === "https:" ? https : http;
     const headers: Record<string, string | number> = {
-      "Content-Type": "application/json", Accept: "text/event-stream", "Content-Length": Buffer.byteLength(body),
+      "Content-Type": "application/json", Accept: "text/event-stream",
+      "Content-Length": new TextEncoder().encode(body).byteLength,
     };
     if (this.settings.apiKey) headers.Authorization = `Bearer ${this.settings.apiKey}`;
 
+    const { firstByteMs, idleMs } = this.settings.timeouts ?? { firstByteMs: FIRST_BYTE_TIMEOUT_MS, idleMs: IDLE_TIMEOUT_MS };
     return new Promise((resolve, reject) => {
+      // A server that stops sending ends the answer with a message, instead of leaving the chat waiting (#179)
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const quiet = (ms: number, what: string): void => {
+        clearTimeout(timer);
+        timer = setTimeout(() => req.destroy(new Error(
+          `${url.host} ${what} for ${Math.round(ms / 1000)} seconds, so the answer was stopped. Is the model server `
+          + "still running?")), ms);
+      };
+      const done = (): void => clearTimeout(timer);
       // A connection of its own per request (agent: false). Node's default agent keeps connections alive, and a
       // request sent right after the last response — a tool that answers at once — reused the socket llama-server
       // was closing, and the turn died with ECONNRESET.
@@ -256,10 +316,19 @@ export class OpenAiChat implements ChatModel {
       const ca = url.protocol === "https:" ? certificateAuthorities() : undefined;
       const req = transport.request(url, { method: "POST", headers, signal, agent: false, ...(ca ? { ca } : {}) }, (res) => {
         res.setEncoding("utf-8");
+        quiet(idleMs, "sent nothing more");
         if ((res.statusCode ?? 0) >= 400) {
           let text = "";
           res.on("data", (part: string) => (text += part));
-          res.on("end", () => reject(httpError(res.statusCode ?? 0, url.host, text)));
+          res.on("end", () => {
+            // A strict server that does not know stream_options: ask again without it, and from now on
+            if (asked && res.statusCode === 400 && /stream_options/i.test(text)) {
+              this.streamUsage = false;
+              resolve(this.complete(request, deltas, signal));
+              return;
+            }
+            reject(httpError(res.statusCode ?? 0, url.host, text));
+          });
           return;
         }
         const decoder = new SseDecoder();
@@ -274,13 +343,24 @@ export class OpenAiChat implements ChatModel {
             return false;
           }
         };
-        res.on("data", (part: string) => void take(decoder.push(part)));
+        res.on("data", (part: string) => {
+          quiet(idleMs, "sent nothing more");
+          void take(decoder.push(part));
+        });
         res.on("end", () => {
+          done();
           if (take(decoder.flush())) resolve(builder.result());
         });
-        res.on("error", reject);
+        res.on("error", (error) => {
+          done();
+          reject(error);
+        });
       });
-      req.on("error", reject);
+      req.on("error", (error) => {
+        done();
+        reject(error);
+      });
+      quiet(firstByteMs, "did not start answering");
       req.end(body);
     });
   }

@@ -49,6 +49,14 @@ describe("test_session_memory.py", () => {
     expect(text).toContain(SUMMARY_END);
   });
 
+  it("keeps the note as it was when the summary comes back empty (#154)", async () => {
+    const pairs = Array.from({ length: 15 }, (_, i) => [`q${i}`, `a${i}`] as [string, string]);
+    const vault = await makeVault(sessionNote("test", makeSessionText(pairs)));
+    const before = await vault.read(sessionPath("test"));
+    expect(await compactSession(vault.vault, "test", summarizer("  "), 10)).toBe(0);
+    expect(await vault.read(sessionPath("test"))).toBe(before);
+  });
+
   it("test_save_session_connection_marker", async () => {
     const vault = await makeVault();
     await saveSession(vault.vault, "s1", [H("a"), A("b"), H("c"), A("d")], {

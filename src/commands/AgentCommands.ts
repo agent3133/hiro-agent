@@ -83,7 +83,8 @@ export class AgentCommands {
   private pick(): void {
     const agents = this.host.agents();
     if (!agents.length) {
-      new Notice("The agent is not running. Check the status bar.");
+      // Only before the agents are read, just after Obsidian starts (#171)
+      new Notice("Hiro Agent: the agents are not loaded yet. Try again in a moment.");
       return;
     }
     new AgentPicker(this.plugin.app, agents, (agent) => this.ask(agent.name)).open();

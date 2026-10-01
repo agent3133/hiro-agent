@@ -24,6 +24,7 @@
 
 import { Document, Scalar, visit } from "yaml";
 
+import { SUMMARY_PREFIX, summaryPrompt } from "./compaction";
 import { readFrontmatter } from "./frontmatter";
 import type { ChatMessage } from "./llm/openaiChat";
 import { redactSecrets } from "./redact";
@@ -57,7 +58,9 @@ export function connectionLabel(connection: string | null | undefined, model: st
 }
 
 export function sanitiseName(name: string): string {
-  return name.trim().toLowerCase().replace(/ /g, "-");
+  // One file in .sessions/: a slash or a leading dot would reach another folder, or out of the vault (#135)
+  const cleaned = name.trim().toLowerCase().replace(/ /g, "-").replace(/[\\/]+/g, "-").replace(/^\.+/, "");
+  return cleaned || "session";
 }
 
 export function sessionPath(name: string): string {
@@ -193,7 +196,7 @@ export async function loadSession(vault: VaultPort, name: string, tokenBudget?: 
     }
     messages = kept.reverse();
   }
-  return summary !== null ? [{ role: "system", content: `Earlier in this session:\n${summary}` }, ...messages] : messages;
+  return summary !== null ? [{ role: "system", content: `${SUMMARY_PREFIX}${summary}` }, ...messages] : messages;
 }
 
 /** A session note's frontmatter, or {} — `session_meta`. */
@@ -211,7 +214,8 @@ export async function listSessions(vault: VaultPort): Promise<SessionSummary[]> 
     const stem = note.slice(SESSION_DIR.length + 1, -3);
     try {
       const meta = frontmatterOf(await readNote(vault, note));
-      found.push({ name: String(meta.session ?? stem), agent: String(meta.agent ?? ""), model: String(meta.model ?? ""),
+      // The file names the session, not its frontmatter: a note arriving by sync decides nothing about paths (#135)
+      found.push({ name: stem, agent: String(meta.agent ?? ""), model: String(meta.model ?? ""),
                    connection: String(meta.connection ?? ""), exchanges: Number(meta.exchanges ?? 0) || 0,
                    updated: String(meta.updated ?? "") });
     } catch {
@@ -233,7 +237,7 @@ export async function deleteSession(vault: VaultPort, name: string): Promise<boo
  * summary and the recent exchanges — `compact_session`. Returns how many exchanges were summarised.
  */
 export async function compactSession(vault: VaultPort, name: string, summarize: (prompt: string) => Promise<string>,
-                                     keepRecent = 10): Promise<number> {
+                                     keepRecent = 10, maxChars = Infinity): Promise<number> {
   const path = sessionPath(name);
   const existing = (await vault.isFile(path)) ? await readNote(vault, path) : "";
   const previous = summaryOf(existing);
@@ -251,16 +255,9 @@ export async function compactSession(vault: VaultPort, name: string, summarize: 
   const recent = pairs.length >= keepRecent ? pairs.slice(pairs.length - keepRecent) : pairs;
   if (!old.length) return 0;
 
-  const conversation = old.flatMap(([h, a]) => [`<human: ${h.content}>`, `<assistant: ${a.content}>`]).join("\n");
-  const intro = previous
-    ? "Below is a summary of the earliest part of a conversation, followed by later exchanges. Write ONE updated "
-      + "summary covering both, preserving the important facts from the earlier summary. Focus on:\n"
-    : "Summarise the following conversation exchanges concisely. Focus on:\n";
-  const earlier = previous ? `Summary of earlier exchanges:\n${previous}\n\n` : "";
-  const prompt = `${intro}- What the user was trying to accomplish\n- Key facts discovered (file names, values, decisions made)\n`
-    + "- Actions taken (notes created/updated, searches performed)\n- Any unresolved questions or follow-ups\n\n"
-    + `${earlier}Conversation:\n${conversation}\n\nReturn ONLY the summary text. Be concise — 3 to 10 sentences.`;
-  const summary = (await summarize(prompt)).trim();
+  // With *maxChars*, the oldest exchanges are left out of the prompt so it fits the model that summarises (#154)
+  const summary = (await summarize(summaryPrompt(previous, old, maxChars))).trim();
+  if (!summary) return 0;  // an empty answer would lose the old exchanges for nothing
 
   const meta = frontmatterOf(existing);
   const stamp = now();

@@ -30,7 +30,7 @@ describe("httpError", () => {
     expect(error).not.toBeInstanceOf(ContextOverflowError);
     expect(error.message).toBe("api.openai.com did not accept the API key (HTTP 401: Incorrect API key provided: "
       + "sk-proj-…abcd. You can find your API key at https://platform.openai.com/account/api-keys.). Check the key "
-      + "this connection names in Settings → Hiro Agent → Secrets.");
+      + "this connection names in Obsidian's keychain (Settings → Keychain).");
   });
 
   it("gives any other error the server's message rather than its JSON", () => {

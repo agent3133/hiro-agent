@@ -64,8 +64,10 @@ export function describe(request: ConfirmRequest): { summary: string; detail: st
     append_to_note: `Append to ${path}`,
     update_metadata: `Set ${String(input.key ?? "a property")} in ${path}`,
   };
-  const summary = verbs[request.name] ?? `Run ${request.name}`;
-  const content = String(input.content ?? input.new_text ?? input.text ?? "");
-  const detail = content ? (content.length > 600 ? `${content.slice(0, 600)}…` : content) : "";
-  return { summary, detail };
+  const known = verbs[request.name];
+  // A tool without a sentence of its own — an MCP server's — shows every argument it will get: the user is asked
+  // about what will run, not about its name (#135)
+  const content = known ? String(input.content ?? input.new_text ?? input.text ?? "") : JSON.stringify(input, null, 2);
+  const detail = content && content !== "{}" ? (content.length > 1200 ? `${content.slice(0, 1200)}…` : content) : "";
+  return { summary: known ?? `Run ${request.name}`, detail };
 }

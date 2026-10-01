@@ -19,7 +19,8 @@ const CONFIG = {
   llm: { provider: "openai", model: "gpt-5.4-mini", api_key: KEY, temperature: 0.7 },
   llm_profiles: { local: { provider: "llamacpp", base_url: "http://127.0.0.1:8080" },
                   cloud: { provider: "openai", api_key: "${OPENAI_API_KEY}" } },
-  ui: { theme: "dark" },
+  // Python's fixture had `ui: { theme: "dark" }` here; the plugin has no ui section (#180)
+  journal: { turns: 20 },
 };
 
 /** A store holding *values*, and what it has written (Python's `client` and `written`). */
@@ -180,5 +181,31 @@ describe("withoutObsolete", () => {
     expect((await store.putConfig({ llm: { model: "m" } })).ok).toBe(false);
     stored = withoutObsolete(stored)!;
     expect((await store.putConfig({ llm: { model: "m" } })).ok).toBe(true);
+  });
+  // What the Python runtime wrote and the plugin never read (#180)
+  const PYTHON_ERA = {
+    ui: { theme: "dark" }, agents: { dirs: [] }, tools: { dirs: [] },
+    external_tools: { git: { enabled: true }, obsidian_cli: { enabled: true } },
+    llm: { model: "m", provider_class: "x.Y", thinking_budget: 1024 },
+    llm_profiles: { local: { base_url: "http://127.0.0.1:8080", thinking_budget: 512 }, cloud: { model: "c" } },
+    memory: { enabled: true, auto_reflect_on_session_end: true },
+    journal: { turns: 20 },
+  };
+
+  it("drops the Python runtime's sections and fields, wherever a connection has them (#180)", () => {
+    expect(withoutObsolete(PYTHON_ERA)).toEqual({
+      llm: { model: "m" },
+      llm_profiles: { local: { base_url: "http://127.0.0.1:8080" }, cloud: { model: "c" } },
+      memory: { enabled: true },
+      journal: { turns: 20 },
+    });
+  });
+
+  it("lets such settings be saved again: nothing left fails the schema", async () => {
+    let stored: Record<string, unknown> = structuredClone(PYTHON_ERA);
+    const store = new ConfigStore(() => stored, async (values) => { stored = values; }, () => "/vault");
+    expect((await store.putConfig({ journal: { turns: 30 } })).ok).toBe(false);
+    stored = withoutObsolete(stored)!;
+    expect((await store.putConfig({ journal: { turns: 30 } })).ok).toBe(true);
   });
 });

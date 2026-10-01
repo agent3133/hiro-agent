@@ -2,6 +2,7 @@
 
 import type { App } from "obsidian";
 
+import { protectVaultPaths } from "../core/paths";
 import { inSpecOrder, makeTools, type MemorySettings, type Tool } from "../core/tools";
 import { makeAttachmentTools } from "./attachmentTools";
 import { makeIndexTools } from "./indexTools";
@@ -21,6 +22,8 @@ export interface ToolsetOptions {
 }
 
 export function obsidianToolset(app: App, scope: string[] | null, options: ToolsetOptions): Tool[] {
+  // This vault's config folder, however it is named, and the user profile are out of the tools' reach (#135)
+  protectVaultPaths({ configDir: app.vault.configDir, profilePath: options.memory?.profilePath });
   const vault = obsidianVault(app);
   return inSpecOrder([...makeTools(vault, scope, { memory: options.memory }), ...makeIndexTools(app, vault, scope),
                       ...makePluginTools(app, vault, scope), ...makeAttachmentTools(app, scope, options.audio),
@@ -70,6 +73,7 @@ export function audioSettings(config: { values: Record<string, unknown> } | null
     model: typeof audio.model === "string" && audio.model.trim() ? audio.model.trim() : null,
     language: text(audio.language, DEFAULT_AUDIO.language),
     useGpu: audio.use_gpu === true,
+    approved: true,
     threads: typeof audio.threads === "number" ? audio.threads : null,
     timeoutFactor: typeof audio.timeout_factor === "number" ? audio.timeout_factor : DEFAULT_AUDIO.timeoutFactor,
     extraArgs: Array.isArray(audio.extra_args) ? audio.extra_args.map(String) : [],

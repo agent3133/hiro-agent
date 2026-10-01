@@ -90,8 +90,14 @@ export function makeSearchTools(vault: VaultPort, scope: string[] | null = null)
       }
       if (results.length >= limit) break;
     }
-    // Python answers "" for no results; a restricted agent's empty answer says where it looked (paths.scopeHint)
-    if (!results.length && scope && scope.length) return `No notes found${scopeHint(scope)}`;
+    // Said in words: an empty answer reads to a small model as a broken tool (#160). A restricted agent's also says
+    // where it looked (paths.scopeHint)
+    if (!results.length) {
+      if (scope && scope.length) return `No notes found${scopeHint(scope)}`;
+      const asked = [query && `contain '${query}'`, wantedTag && `are tagged #${wantedTag}`,
+                     wantedFolder && `are in '${wantedFolder}'`].filter(Boolean).join(" and ");
+      return `No notes ${asked}. Try fewer or other words, or find_notes to search by name.`;
+    }
     return results.join("\n");
   });
 

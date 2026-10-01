@@ -13,6 +13,9 @@ describe("humanize", () => {
     expect(humanize("base_url")).toBe("Base URL");
     expect(humanize("llm_profiles")).toBe("LLM profiles");
     expect(humanize("use_gpu")).toBe("Use GPU");
+    expect(humanize("top_p")).toBe("Top P");
+    expect(humanize("top_k")).toBe("Top K");
+    expect(humanize("min_p")).toBe("Min P");
   });
 
   it("leaves a word that only contains an acronym alone", () => {

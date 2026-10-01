@@ -250,3 +250,23 @@ describe("the built-in agents", () => {
     }
   });
 });
+
+describe("an agent listing MCP tools before this device listed the server (#178)", () => {
+  async function catalogWith(servers: string[]) {
+    const vault = await makeVault();
+    return new AgentCatalog(vault.vault, () => ({ defaultAgent: "assistant", profiles: [] }), async () => [],
+                            () => ({}), () => servers);
+  }
+
+  it("is saved when the tool's server is configured", async () => {
+    const catalog = await catalogWith(["search"]);
+    expect((await catalog.saveAgent("assistant", { fields: { tools: ["read_note", "search__web"] } })).ok).toBe(true);
+  });
+
+  it("is refused when no server of that name is configured", async () => {
+    const catalog = await catalogWith(["search"]);
+    const result = await catalog.saveAgent("assistant", { fields: { tools: ["other__web"] } });
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).toContain("there is no tool called 'other__web'");
+  });
+});

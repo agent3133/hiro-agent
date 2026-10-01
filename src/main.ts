@@ -4,34 +4,49 @@
  * `commands/`) and the settings tab (WP8) around it.
  */
 
-import { FileSystemAdapter, Notice, Plugin, TFile, WorkspaceLeaf, requestUrl } from "obsidian";
+import { FileSystemAdapter, Notice, Platform, Plugin, TFile, WorkspaceLeaf, requestUrl } from "obsidian";
 
 import { AgentCommands } from "./commands/AgentCommands";
 import type { NoteContext } from "./commands/context";
+import { messageOf } from "./core/errors";
 import { AgentSettingTab, DEFAULT_SETTINGS, OBSOLETE_SETTINGS, type PluginSettings } from "./settings";
+import { renderContextStatus } from "./view/contextStatus";
 import { CHAT_VIEW_TYPE, ChatView } from "./view/ChatView";
 import { ConfirmModal } from "./view/ConfirmModal";
 import { sessionNameFor } from "./view/sessionName";
 import { InProcessAgent } from "./inprocess/InProcessAgent";
 import { AgentCatalog } from "./config/agents";
 import { PluginBackend } from "./config/backend";
-import { defaultProfileName, hasConnection, profileSummaries, resolveConnection } from "./config/connections";
+import { defaultProfileName, hasConnection, migrateBareLlm, profileSummaries, resolveConnection } from "./config/connections";
 import { addLocalServer, findLocalServers, type Profiles } from "./settings/connections";
 import { probe } from "./settings/probe";
 import { registerCli } from "./cli/register";
 import type { AgentStatus } from "./cli/status";
 import { ConfigStore, withoutObsolete } from "./config/store";
+import { KEYCHAIN_NAME, migrateDeviceApprovals, migrateMcpApprovals, migrateReferences,
+         renameConnectionApproval, renames }
+  from "./config/keychainRefs";
+import { changedApprovals, connectionApproval, DEVICE_APPROVALS_KEY, DeviceApprovals, programsApproval,
+  requiredApprovals } from "./config/deviceApprovals";
 import { APPROVALS_KEY, McpApprovals } from "./mcp/approvals";
-import { McpManager } from "./mcp/manager";
+import { mcpServers, needsApproval } from "./mcp/servers";
+import { switchedOffTools } from "./config/features";
+import { McpManager, type McpTool } from "./mcp/manager";
 import { nodeFetch } from "./mcp/nodeFetch";
 import { McpService } from "./mcp/service";
 import { listSessions } from "./core/sessions";
-import { obsidianVault } from "./vault/obsidianVault";
+import { obsidianVault, setRecorder } from "./vault/obsidianVault";
 import { nodePrograms } from "./vault/programs";
 import { registerToolCli } from "./vault/toolCli";
 import { toolsetOptions, type ToolsetOptions } from "./vault/toolset";
 
 const LOG_LINES = 200;
+
+/** This device's Developer switch, in Obsidian's local storage for this vault (#136). */
+const DEVELOPER_KEY = "agent-developer";
+
+/** Where the MCP servers' last listed tools are kept on this device (#178). */
+const MCP_TOOLS_KEY = "agent-mcp-tools";
 
 export default class ObsidianAgentPlugin extends Plugin {
   override settings: PluginSettings = { ...DEFAULT_SETTINGS };  // Plugin declares `settings?: unknown`
@@ -39,13 +54,20 @@ export default class ObsidianAgentPlugin extends Plugin {
   private commands: AgentCommands | null = null;
   // The agent's configuration and agents, kept by the plugin (#86), and the agent that answers in the plugin
   private readonly store = new ConfigStore(() => this.settings.agentConfig, async (values) => {
+    // A change made here approves what it changed on this device (#136); one that arrives by sync does not pass
+    // through here, so it waits for Approve in the settings
+    const changed = changedApprovals(this.settings.agentConfig, values);
     this.settings.agentConfig = values;
     await this.saveSettings();
+    if (changed.length) this.deviceApprovals.approve(...changed);
   }, () => this.vaultPath() ?? "");
   // MCP servers (#87): kept connected while Obsidian runs; a stdio one starts only once approved on this device,
   // and the approvals live in this device's local storage, not in data.json, which syncs
   private readonly mcpApprovals = new McpApprovals(() => this.app.loadLocalStorage(APPROVALS_KEY),
                                                    (value) => this.app.saveLocalStorage(APPROVALS_KEY, value));
+  // Where a connection's key goes, and the audio programs: likewise approved on this device, not in data.json (#136)
+  private readonly deviceApprovals = new DeviceApprovals(() => this.app.loadLocalStorage(DEVICE_APPROVALS_KEY),
+                                                         (value) => this.app.saveLocalStorage(DEVICE_APPROVALS_KEY, value));
   private readonly mcpManager = new McpManager({
     vaultPath: () => this.vaultPath() ?? "",
     keychain: (name) => this.secretValue(name),
@@ -53,14 +75,21 @@ export default class ObsidianAgentPlugin extends Plugin {
     log: (line) => this.addLog(line),
     fetch: nodeFetch,
     version: this.manifest.version,
+    // Kept per device, beside the approvals, not in data.json: a server's tools are this device's view of it (#178)
+    rememberedTools: () => (this.app.loadLocalStorage(MCP_TOOLS_KEY) ?? {}) as Record<string, McpTool[]>,
+    rememberTools: (server, tools) => {
+      const all = (this.app.loadLocalStorage(MCP_TOOLS_KEY) ?? {}) as Record<string, McpTool[]>;
+      this.app.saveLocalStorage(MCP_TOOLS_KEY, { ...all, [server]: tools });
+    },
   });
   private readonly mcpService = new McpService(() => this.store.values(), this.mcpManager, this.mcpApprovals);
-  private readonly catalog = new AgentCatalog(obsidianVault(this.app), () => {
+  // Not recorded: an agent saved in the settings is not one of a turn's changes (#177)
+  private readonly catalog = new AgentCatalog(obsidianVault(this.app, { record: false }), () => {
     const values = this.store.values();
     const vault = (values.vault ?? {}) as Record<string, unknown>;
     return { defaultAgent: typeof vault.default_agent === "string" ? vault.default_agent : "assistant",
              profiles: profileSummaries(values).map((p) => p.name) };
-  }, () => this.mcpService.toolInfos());
+  }, () => this.mcpService.toolInfos(), () => switchedOffTools(this.store.values()), () => this.mcpService.names());
   private readonly pluginBackend = new PluginBackend(this.store, this.catalog, nodePrograms, this.manifest.version,
                                                      this.app.vault.getName());
   private readonly inProcess = new InProcessAgent(this.app, {
@@ -68,6 +97,7 @@ export default class ObsidianAgentPlugin extends Plugin {
     env: (name) => this.secretValue(name),
     fetchJson: async (url) => (await requestUrl({ url, throw: true })).json as unknown,
     mcp: this.mcpManager,
+    deviceApprovals: this.deviceApprovals,
     log: (line) => this.addLog(line),
   }, () => this.toolsetOptions());
 
@@ -81,18 +111,112 @@ export default class ObsidianAgentPlugin extends Plugin {
     if (this.log.length > LOG_LINES) this.log.shift();
   }
 
-  /** What the in-plugin agent's tools are set to: its settings. */
+  /** What the in-plugin agent's tools are set to: its settings, and whether this device approved the programs. */
   private async toolsetOptions(): Promise<ToolsetOptions> {
-    return toolsetOptions({ values: this.store.values() });
+    const values = this.store.values();
+    const options = toolsetOptions({ values });
+    const programs = programsApproval(values);
+    return { ...options, audio: { ...options.audio, approved: !programs || this.deviceApprovals.approved(programs) } };
   }
 
   /**
-   * A `${VAR}` reference in the settings: the keychain secret bound to that name (Secrets), and nothing else — no
-   * environment variable, no key written into the settings. Obsidian's keychain is the one place a key lives.
+   * Developer (#81): `agent:tool`, and `agent:ask allow=destructive` without the dialog. Kept in this device's
+   * local storage, not in data.json: a switch that turns off confirmations must not arrive by sync (#136).
+   */
+  developer(): boolean {
+    return this.app.loadLocalStorage(DEVELOPER_KEY) === true;
+  }
+
+  setDeveloper(on: boolean): void {
+    this.app.saveLocalStorage(DEVELOPER_KEY, on ? true : null);
+  }
+
+  /** What a connection's key or the audio programs need approved here, and whether they are; null when nothing. */
+  approvalStatus(kind: "connection" | "programs", name = ""): { what: string; approved: boolean } | null {
+    const values = this.store.values();
+    const approval = kind === "connection" ? connectionApproval(values, name) : programsApproval(values);
+    return approval && { what: approval.what, approved: this.deviceApprovals.approved(approval) };
+  }
+
+  /** Approve on this device what the settings ask for now — the settings tab's Approve button. */
+  approveOnThisDevice(kind: "connection" | "programs", name = ""): void {
+    const values = this.store.values();
+    const approval = kind === "connection" ? connectionApproval(values, name) : programsApproval(values);
+    if (approval) this.deviceApprovals.approve(approval);
+  }
+
+  /**
+   * The first start of a version that asks for approvals, on this device: what is configured already ran without
+   * asking before, so it is approved as it stands; from now on only changes made here approve themselves (#136).
+   */
+  private approveWhatIsThere(): void {
+    const values = this.store.values();
+    this.deviceApprovals.approve(...requiredApprovals(values));
+    for (const spec of mcpServers(values)) {
+      if (spec.transport !== "stdio" && needsApproval(spec) && !this.mcpApprovals.approved(spec)) this.mcpApprovals.approve(spec);
+    }
+  }
+
+  /**
+   * A `${name}` reference in the settings: the entry of that name in Obsidian's keychain (Settings → Keychain), and
+   * nothing else — no environment variable, no key written into the settings (#147).
    */
   private secretValue(name: string): string | undefined {
-    const binding = this.settings.secrets.find((secret) => secret.env === name);
-    return (binding?.id ? this.app.secretStorage.getSecret(binding.id) : null) || undefined;
+    if (!KEYCHAIN_NAME.test(name)) return undefined;
+    return this.app.secretStorage.getSecret(name) || undefined;
+  }
+
+  /** A keychain entry's value, for a connection's Test in the settings on this device (#149). */
+  keychainValue(name: string): string | undefined {
+    return this.secretValue(name);
+  }
+
+  /** The keychain's entry names on this device, for the settings; none when the keychain does not answer. */
+  keychainNames(): string[] {
+    try {
+      return [...this.app.secretStorage.listSecrets()].sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Once: the old Secrets tab's names (`${OPENAI_API_KEY}`) become the keychain entries they stood for
+   * (`${openai-api-key}`) everywhere in the settings, and this device's approvals follow the rename (#147). Another
+   * device receives the renamed settings by sync and approves them there.
+   */
+  private migrateSecretBindings(bindings: unknown): boolean {
+    const renamed = renames(bindings);
+    if (!Object.keys(renamed).length) return false;
+    this.settings.agentConfig = migrateReferences(this.settings.agentConfig, renamed) as Record<string, unknown>;
+    const device = migrateDeviceApprovals(this.app.loadLocalStorage(DEVICE_APPROVALS_KEY), renamed);
+    if (device) this.app.saveLocalStorage(DEVICE_APPROVALS_KEY, device);
+    const mcp = migrateMcpApprovals(this.app.loadLocalStorage(APPROVALS_KEY), renamed);
+    if (mcp) this.app.saveLocalStorage(APPROVALS_KEY, mcp);
+    this.addLog(`Keys now named as in the keychain: ${Object.entries(renamed).map(([from, to]) => `${from} → ${to}`).join(", ")}`);
+    return true;
+  }
+
+  /** Once: a connection without a name becomes a named one, with this device's approval (#149). */
+  private nameBareConnection(): boolean {
+    const moved = migrateBareLlm(this.settings.agentConfig);
+    if (!moved) return false;
+    this.settings.agentConfig = moved.values;
+    const device = renameConnectionApproval(this.app.loadLocalStorage(DEVICE_APPROVALS_KEY), moved.name);
+    if (device) this.app.saveLocalStorage(DEVICE_APPROVALS_KEY, device);
+    this.addLog(`The connection without a name is now '${moved.name}'.`);
+    return true;
+  }
+
+  private contextItem: HTMLElement | null = null;
+
+  /** The status bar item for the context meter, made on first use (#151). */
+  private contextStatus(): HTMLElement {
+    if (!this.contextItem) {
+      this.contextItem = this.addStatusBarItem();
+      this.contextItem.addClass("obsidian-agent-context", "is-hidden");
+    }
+    return this.contextItem;
   }
 
   /** The agent's settings and agents, as the settings tabs and the chat header ask for them (#86). */
@@ -102,14 +226,21 @@ export default class ObsidianAgentPlugin extends Plugin {
 
   override async onload(): Promise<void> {
     await this.loadSettings();
+    if (!this.deviceApprovals.initialized()) this.approveWhatIsThere();
     this.addSettingTab(new AgentSettingTab(this.app, this));
-    if (this.settings.developerTools) {
+    // Checked first, with Obsidian's own flag: the command line and everything below need the desktop app (#183).
+    // A vault without a folder on disk is refused too, as before: the tools and programs read files by path
+    if (!Platform.isDesktopApp || !this.vaultPath()) {
+      new Notice("Hiro Agent runs on desktop only for now.");
+      return;
+    }
+    if (this.developer()) {
       registerToolCli(this, this.app, () => this.toolsetOptions());
     }
     registerCli(this, {
       status: () => this.cliStatus(),
       agents: async () => (await this.pluginBackend.refresh()).agents,
-      sessions: () => listSessions(obsidianVault(this.app)),
+      sessions: () => listSessions(obsidianVault(this.app, { record: false })),
       ask: {
         info: () => this.pluginBackend.refresh(),
         send: (prompt, options, handlers) => this.inProcess.send(prompt, options, handlers),
@@ -117,17 +248,11 @@ export default class ObsidianAgentPlugin extends Plugin {
         confirm: (turn, callId, approved) => this.inProcess.confirm(turn, callId, approved),
         noteExists: async (path) => this.app.vault.getAbstractFileByPath(path) instanceof TFile,
         askInObsidian: (name, input) => new Promise((resolve) => new ConfirmModal(this.app, { name, input }, resolve).open()),
-        developer: () => this.settings.developerTools,
+        developer: () => this.developer(),
         notice: (text) => new Notice(text, 10_000),
         sessionName: (prompt) => sessionNameFor(prompt),
       },
     });
-
-    if (!this.vaultPath()) {
-      // Mobile has no file system path and no way to run a binary; say so once instead of failing repeatedly.
-      new Notice("Hiro Agent runs on desktop only.");
-      return;
-    }
 
     this.registerView(CHAT_VIEW_TYPE, (leaf: WorkspaceLeaf) => new ChatView(leaf, {
       agent: () => this.inProcess,
@@ -135,6 +260,7 @@ export default class ObsidianAgentPlugin extends Plugin {
       lastSession: () => this.settings.lastSession,
       keepByDefault: () => this.settings.keepConversations,
       lastProfile: () => this.settings.lastProfile,
+      context: (usage) => renderContextStatus(this.contextStatus(), usage),
       rememberProfile: (name: string) => {
         if (this.settings.lastProfile === name) return;
         this.settings.lastProfile = name;
@@ -191,6 +317,8 @@ export default class ObsidianAgentPlugin extends Plugin {
   }
 
   override async onunload(): Promise<void> {
+    // The journal's recorder is module state in obsidianVault: a reloaded plugin starts without one (#177)
+    setRecorder(null);
     await this.mcpManager.closeAll().catch(() => undefined);
   }
 
@@ -233,6 +361,7 @@ export default class ObsidianAgentPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const stored = { ...((await this.loadData()) ?? {}) } as Record<string, unknown>;
+    const bindings = stored.secrets;
     // How the runtime was started, and the switch to it: gone with the runtime (#88), and from data.json at once
     const obsolete = OBSOLETE_SETTINGS.filter((key) => key in stored);
     for (const key of obsolete) delete stored[key];
@@ -241,7 +370,9 @@ export default class ObsidianAgentPlugin extends Plugin {
                       agentConfig: (stored.agentConfig as Record<string, unknown> | null) ?? {} };
     const config = withoutObsolete(this.settings.agentConfig);
     if (config) this.settings.agentConfig = config;
-    if (obsolete.length || config) await this.saveSettings();
+    const migrated = this.migrateSecretBindings(bindings);
+    const named = this.nameBareConnection();
+    if (obsolete.length || config || migrated || named) await this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {
@@ -257,15 +388,16 @@ export default class ObsidianAgentPlugin extends Plugin {
 
   /** After a config write: the connections may have changed, and the chat header's picker should list them. */
   async configChanged(): Promise<void> {
-    await this.pluginBackend.refresh().catch(() => undefined);
+    // A failure leaves the pickers as they were; the log says why (#174)
+    await this.pluginBackend.refresh().catch((error) => this.addLog(`Could not refresh the agents and connections: ${messageOf(error)}`));
     // An MCP server that was removed, switched off or changed is closed; the next use starts it as it is now
-    await this.mcpService.sync().catch(() => undefined);
+    await this.mcpService.sync().catch((error) => this.addLog(`Could not update the MCP servers: ${messageOf(error)}`));
     for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) (leaf.view as ChatView).refreshProfiles();
   }
 
   /** After the Agents tab created, changed or deleted one: the chat's picker and the commands follow. */
   async agentsChanged(): Promise<void> {
-    await this.pluginBackend.refresh().catch(() => undefined);
+    await this.pluginBackend.refresh().catch((error) => this.addLog(`Could not refresh the agents: ${messageOf(error)}`));
     this.commands?.sync();
     for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) await (leaf.view as ChatView).refreshAgents();
   }

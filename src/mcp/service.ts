@@ -5,10 +5,11 @@
  */
 
 import type { ToolInfo } from "../api/types";
+import { messageOf } from "../core/errors";
 import { mcpToolInfos } from "./agentTools";
 import type { McpApprovals } from "./approvals";
 import type { McpManager, McpTool } from "./manager";
-import { commandLine, mcpServers, type McpServerSpec } from "./servers";
+import { commandLine, httpLine, mcpServers, needsApproval, type McpServerSpec } from "./servers";
 
 export interface McpServerStatus {
   spec: McpServerSpec;
@@ -30,7 +31,7 @@ export class McpService {
 
   status(): McpServerStatus[] {
     return this.servers().map((spec) => ({
-      spec, commandLine: spec.transport === "stdio" ? commandLine(spec) : "", approved: this.approvals.approved(spec),
+      spec, commandLine: spec.transport === "stdio" ? commandLine(spec) : needsApproval(spec) ? httpLine(spec) : "", approved: this.approvals.approved(spec),
     }));
   }
 
@@ -41,7 +42,7 @@ export class McpService {
     try {
       return { ok: true, tools: await this.manager.tools(spec) };
     } catch (error) {
-      return { ok: false, error: (error as Error).message };
+      return { ok: false, error: messageOf(error) };
     }
   }
 
@@ -61,10 +62,18 @@ export class McpService {
     await this.manager.sync(this.servers());
   }
 
-  /** The Agents tab's MCP switches: the tools of the servers that are on and may run; none of the others. */
+  /**
+   * The Agents tab's MCP switches: the tools of the servers that are on and may run, as each last listed them —
+   * opening the tab or saving an agent starts no server (#178). A server not listed yet shows once a turn or its
+   * Test has connected.
+   */
   async toolInfos(): Promise<ToolInfo[]> {
     const specs = this.servers().filter((spec) => spec.enabled);
-    const { tools } = await this.manager.agentTools(specs.filter((spec) => this.approvals.approved(spec)));
-    return mcpToolInfos(specs, tools);
+    return mcpToolInfos(specs, this.manager.knownTools(specs.filter((spec) => this.approvals.approved(spec))));
+  }
+
+  /** The names of the servers that are configured, switched on or not. */
+  names(): string[] {
+    return this.servers().map((spec) => spec.name);
   }
 }

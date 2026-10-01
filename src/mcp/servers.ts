@@ -4,7 +4,7 @@
  *
  * Kept from Python: `stdio` and `http` (streamable HTTP), `enabled`, `tools_filter`, tools named `server__tool`,
  * `${vault_path}` in the arguments. Different, decided 2026-09-29:
- * - a `${NAME}` in `env`, `headers` or the URL is read from Obsidian's keychain (Secrets) and nowhere else;
+ * - a `${name}` in `env`, `headers` or the URL names an entry in Obsidian's keychain, read from there and nowhere else;
  * - a `stdio` server gets only the MCP SDK's safe environment (PATH, HOME, …) plus its own `env`, never the whole
  *   of Obsidian's;
  * - a `stdio` server is a program started on this machine, and the settings sync with the vault: it runs only
@@ -86,10 +86,28 @@ export function commandLine(spec: McpServerSpec): string {
 
 /**
  * What an approval is for: a stdio server's command, arguments and env as written (references, not the keys
- * they name — a new key in the keychain needs no new approval, a changed command does).
+ * they name — a new key in the keychain needs no new approval, a changed command does); an http server's URL and
+ * headers as written, when they send a key (#136).
  */
 export function fingerprint(spec: McpServerSpec): string {
+  if (spec.transport !== "stdio") {
+    return JSON.stringify([spec.name, "http", spec.url, Object.entries(spec.headers).sort()]);
+  }
   return JSON.stringify([spec.name, spec.command, spec.args, Object.entries(spec.env).sort()]);
+}
+
+/**
+ * Whether *spec* may be used only once approved on this device: a stdio server starts a program here; an http
+ * server whose URL or headers name a `${KEY}` sends a keychain secret to wherever the synced settings say (#136).
+ */
+export function needsApproval(spec: McpServerSpec): boolean {
+  if (spec.transport === "stdio") return true;
+  return [spec.url, ...Object.values(spec.headers)].some((text) => /\$\{[^}]+\}/.test(text));
+}
+
+/** What an http server that needs approval sends, as the user is shown it: the URL and the headers as written. */
+export function httpLine(spec: McpServerSpec): string {
+  return [spec.url, ...Object.entries(spec.headers).map(([name, value]) => `${name}: ${value}`)].join("\n");
 }
 
 export class McpConfigError extends Error {
@@ -110,7 +128,7 @@ export function fillReferences(text: string, where: string, vaultPath: string,
     if (name === "vault_path") return vaultPath;
     const value = keychain(name);
     if (value === undefined || value === "") {
-      throw new McpConfigError(`${where} names \${${name}}, which has no key in Settings → Hiro Agent → Secrets`);
+      throw new McpConfigError(`${where} names \${${name}}, which is not in Obsidian's keychain on this device (Settings → Keychain)`);
     }
     return value;
   });

@@ -8,7 +8,7 @@
  * the user has seen what it runs and said yes, here.
  */
 
-import { fingerprint, type McpServerSpec } from "./servers";
+import { fingerprint, needsApproval, type McpServerSpec } from "./servers";
 
 export const APPROVALS_KEY = "agent-mcp-approved";
 
@@ -24,18 +24,31 @@ export class McpApprovals {
     }
   }
 
-  /** An http server runs nothing here and needs none; a stdio server needs this exact command line approved. */
+  /**
+   * A stdio server needs this exact command line approved; an http server needs its URL and headers approved when
+   * they send a key (#136), and nothing otherwise.
+   */
   approved(spec: McpServerSpec): boolean {
-    return spec.transport !== "stdio" || this.all().includes(fingerprint(spec));
+    return !needsApproval(spec) || this.all().includes(fingerprint(spec));
   }
 
   approve(spec: McpServerSpec): void {
-    const others = this.all().filter((item) => JSON.parse(item)[0] !== spec.name);
+    const others = this.all().filter((item) => nameOf(item) !== spec.name);
     this.save([...others, fingerprint(spec)]);
   }
 
   /** Forget a server's approval — when it is removed, or its approval taken back. */
   revoke(name: string): void {
-    this.save(this.all().filter((item) => JSON.parse(item)[0] !== name));
+    this.save(this.all().filter((item) => nameOf(item) !== name));
+  }
+}
+
+/** The server an approval is for; "" for an entry that is not one (a corrupt one is dropped, not thrown). */
+function nameOf(item: string): string {
+  try {
+    const parsed: unknown = JSON.parse(item);
+    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : "";
+  } catch {
+    return "";
   }
 }

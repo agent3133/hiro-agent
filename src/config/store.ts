@@ -47,16 +47,42 @@ function changedKeys(before: Values, after: Values, prefix = ""): string[] {
 }
 
 /** Settings the agent no longer has; stored, they would fail the schema on every change — web_search's (#118). */
-const OBSOLETE_CONFIG: [string, string][] = [["builtin_tools", "web_search"]];
+const OBSOLETE_CONFIG: [string, string][] = [
+  ["builtin_tools", "web_search"],
+  // The Python runtime's, which the plugin never read (#180)
+  ["memory", "auto_reflect_on_session_end"],
+];
+/** Whole sections of the Python runtime's that the plugin never read: its terminal UI, folders and CLI tools (#180). */
+const OBSOLETE_SECTIONS = ["ui", "agents", "tools", "external_tools"];
+/** Fields of a connection the plugin never read (#180), in `llm` and in every named connection. */
+const OBSOLETE_CONNECTION_FIELDS = ["provider_class", "thinking_budget"];
 
 /** *values* without the obsolete settings, or null when it has none. */
 export function withoutObsolete(values: Values): Values | null {
-  const found = OBSOLETE_CONFIG.filter(([section, key]) => {
+  const isObject = (value: unknown): value is Values => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  const patch: Values = {};
+  const drop = (section: string, keys: string[]): Values | null => {
     const part = values[section];
-    return Boolean(part) && typeof part === "object" && key in (part as Values);
-  });
-  if (!found.length) return null;
-  return merge(values, Object.fromEntries(found.map(([section, key]) => [section, { [key]: null }])));
+    const found = isObject(part) ? keys.filter((key) => key in part) : [];
+    return found.length ? Object.fromEntries(found.map((key) => [key, null])) : null;
+  };
+  for (const [section, key] of OBSOLETE_CONFIG) {
+    const found = drop(section, [key]);
+    if (found) patch[section] = { ...(patch[section] as Values | undefined), ...found };
+  }
+  for (const section of OBSOLETE_SECTIONS) if (section in values) patch[section] = null;
+  const llm = drop("llm", OBSOLETE_CONNECTION_FIELDS);
+  if (llm) patch.llm = llm;
+  const profiles = values.llm_profiles;
+  if (isObject(profiles)) {
+    const perProfile: Values = {};
+    for (const [name, profile] of Object.entries(profiles)) {
+      const found = isObject(profile) ? OBSOLETE_CONNECTION_FIELDS.filter((key) => key in profile) : [];
+      if (found.length) perProfile[name] = Object.fromEntries(found.map((key) => [key, null]));
+    }
+    if (Object.keys(perProfile).length) patch.llm_profiles = perProfile;
+  }
+  return Object.keys(patch).length ? merge(values, patch) : null;
 }
 
 export class ConfigStore {
@@ -81,7 +107,6 @@ export class ConfigStore {
       values: maskSecrets(raw) as Values,
       secrets: secretFlags(raw),
       schema: SCHEMA as ConfigDocument["schema"],
-      restart_required_keys: [],
     };
   }
 
@@ -92,15 +117,15 @@ export class ConfigStore {
     // A key belongs in Obsidian's keychain; typed into a field it would sit in data.json, which syncs with the vault
     const fields = [
       ...literalSecrets(dropMasks(changes)).map((path) => ({
-        path, message: "write a ${VARIABLE} reference; the key itself goes in Secrets" })),
+        path, message: "put the key in Obsidian's keychain (Settings → Keychain) and write ${its-name} here" })),
       ...validate(merge(after, { vault: { path: this.vaultPath() } }), SCHEMA),
     ];
     if (fields.length) {
-      return { ok: false, changed: [], restart_required: [], reloaded: false, error: "the config would not be valid",
+      return { ok: false, changed: [], error: "the config would not be valid",
                fields };
     }
     const changed = changedKeys(before, after);
     if (changed.length) await this.write(after);
-    return { ok: true, changed, restart_required: [], reloaded: changed.length > 0, fields: [] };
+    return { ok: true, changed, fields: [] };
   }
 }

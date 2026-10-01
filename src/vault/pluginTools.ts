@@ -125,7 +125,8 @@ export function makePluginTools(app: App, vault: VaultPort, scope: string[] | nu
   const createTaskNote = defineTool("create_tasknote", async (args) => {
     const title = unquoted(args.str("title"));
     if (!title) return "Error: a task needs a title";
-    // The one named method TaskNotes' own dialogs, HTTP API and MCP server create tasks with
+    // The one named method TaskNotes' own dialogs, HTTP API and MCP server create tasks with. `app.plugins` is not
+    // in the published API; without it, or without TaskNotes, the tool says so rather than failing (#173)
     const plugins = (app as unknown as { plugins?: { getPlugin?(id: string): unknown } }).plugins;
     const tasknotes = plugins?.getPlugin?.("tasknotes") as
       { taskService?: { createTask?(data: Record<string, unknown>): Promise<unknown> } } | null | undefined;
