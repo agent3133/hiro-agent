@@ -182,6 +182,8 @@ export interface TurnHandlers {
    * next message carries — of the window, whether estimated, and the most the answer took along the way.
    */
   onContext?(tokens: number, window: number, estimated: boolean, peak?: number): void;
+  /** A model call of the answer was served at this service tier, as OpenAI said (#295). */
+  onServiceTier?(tier: string): void;
   onDone(reply: string, cancelled: boolean, usage: Record<string, unknown>,
          changed: TurnChanges | null, compacted: number): void;
   onError(message: string, recoverable: boolean): void;

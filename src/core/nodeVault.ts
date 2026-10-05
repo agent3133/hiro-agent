@@ -49,6 +49,8 @@ export function nodeVault(root: string): VaultPort {
       await mkdir(dirname(full(path)), { recursive: true });
       await writeFile(full(path), text, "utf-8");
     },
+    modified: async (path) => (await stat(full(path))).mtimeMs,
+    size: async (path) => (await stat(full(path))).size,
     remove: async (path) => rm(full(path), { force: true }),
     move: async (from, to) => {
       await mkdir(dirname(full(to)), { recursive: true });

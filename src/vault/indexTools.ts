@@ -12,7 +12,7 @@ import { getAllTags, parseLinktext, TFile, type App, type TAbstractFile } from "
 import { checkNoteName, noteFile, PathError, safeResolve, stem, within } from "../core/paths";
 import { defineTool, type Tool } from "../core/tools/tool";
 import { notFound, resolveExistingNote, suggestNotes, type VaultPort } from "../core/vault";
-import { ensureFolder, noteWrite, recordChange, writeCount } from "./obsidianVault";
+import { ensureFolder, HIDDEN_WINDOW_MOVE, noteWrite, recordChange, windowHidden, writeCount } from "./obsidianVault";
 
 /** How long Obsidian may need to index a note we just wrote — Python's INDEX_SETTLE_S. */
 const INDEX_SETTLE_MS = 400;
@@ -179,35 +179,91 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
 
   const exists = async (path: string): Promise<boolean> => (await vault.isFile(path)) || (await vault.isFolder(path));
 
+  /**
+   * The file *raw* names: an existing attachment — an image, a PDF, any file that is not a note — as given, or found
+   * by its bare name the way an embed finds it (#215); anything else is a note, with `.md` added as before.
+   */
+  const fileOrNote = (raw: string): string => {
+    const given = raw.trim().replace(/\\/g, "/");
+    if (!/\.[A-Za-z0-9]{1,8}$/.test(given) || /\.md$/i.test(given)) return noteFile(given);
+    try {
+      if (app.vault.getAbstractFileByPath(safeResolve(given, scope)) instanceof TFile) return given;
+    } catch {
+      return noteFile(given);
+    }
+    if (!given.includes("/")) {
+      const linked = app.metadataCache.getFirstLinkpathDest(given, "");
+      if (linked && linked.extension !== "md" && inScope(linked.path)) return linked.path;
+    }
+    return noteFile(given);
+  };
+  /** Attachments are moved and deleted, but not journaled: undo writes text back, which would break an image. */
+  const isAttachment = (path: string): boolean => !/\.md$/i.test(path);
+  const NOT_UNDONE = " Undo does not cover attachments";
+  /** Where *source* goes: an attachment keeps its extension when the new name has none; a note gets `.md`. */
+  const destinationFor = (source: string, raw: string): string => {
+    if (!isAttachment(source)) return noteFile(raw);
+    const extension = source.slice(source.lastIndexOf("."));
+    const given = raw.trim();
+    return given.toLowerCase().endsWith(extension.toLowerCase()) ? given : `${given}${extension}`;
+  };
+
   const deleteNote = defineTool("delete_note", async (args) => {
-    const path = noteFile(args.str("path"));
-    const { resolved, error } = checked(path);
+    const path = fileOrNote(args.str("path"));
+    const { resolved: given, error } = checked(path);
     if (error) return error;
+    // A wrong folder or a bare name finds the one note of that name (#159); the dialog named it already
+    let resolved = given;
+    if (!(await exists(given))) {
+      const found = await resolveExistingNote(vault, path, scope);
+      if (found.note) resolved = found.note;
+    }
     const target: TAbstractFile | null = app.vault.getAbstractFileByPath(resolved);
     if (!target) {
       if (!(await exists(resolved))) return notFound("note", path, await suggestNotes(vault, path, scope));
-      return `Error: Obsidian does not know '${path}' — notes in hidden folders cannot be deleted with this tool`;
+      return `Error: Obsidian does not know '${resolved}' — notes in hidden folders cannot be deleted with this tool`;
     }
     noteWrite();
-    // The undo journal keeps what the note held: undo writes it back, wherever the trash put it
-    const held = target instanceof TFile ? await app.vault.read(target) : null;
+    // The undo journal keeps what the note held: undo writes it back, wherever the trash put it. Not an
+    // attachment's, which is no text (#215)
+    const attachment = isAttachment(resolved);
+    const kind = attachment ? "attachment" : "note";
+    const held = target instanceof TFile && !attachment ? await app.vault.read(target) : null;
+    const record = (): void => {
+      if (!attachment) recordChange({ op: "delete", path: resolved, before: held, after: null });
+    };
+    const noUndo = attachment ? `.${NOT_UNDONE}` : "";
     if (args.bool("permanent")) {
       await app.vault.delete(target, true);
-      recordChange({ op: "delete", path: resolved, before: held, after: null });
-      return `Deleted note at '${path}' permanently`;
+      record();
+      return `Deleted ${kind} at '${resolved}' permanently${noUndo}`;
     }
     // Where "the trash" is, is the user's choice (Settings → Files and links → Deleted files). `vault.getConfig` is
     // not in the published API: read only, and without it the message names no place rather than failing (#173)
     const option = (app.vault as unknown as { getConfig?(key: string): unknown }).getConfig?.("trashOption");
     await app.fileManager.trashFile(target);
-    recordChange({ op: "delete", path: resolved, before: held, after: null });
-    if (option === "local") return `Moved note '${path}' to ${TRASH}/ (restore it with move_note, or delete permanently)`;
-    if (option === "system") return `Moved note '${path}' to the system trash (restore it from there, outside Obsidian)`;
-    if (option === "none") {
-      return `Deleted note at '${path}' permanently (the vault is set to delete files instead of keeping them in a trash)`;
+    record();
+    if (option === "local") {
+      return `Moved ${kind} '${resolved}' to ${TRASH}/ (restore it with move_note, or delete permanently)${noUndo}`;
     }
-    return `Moved note '${path}' to the trash, as the vault is set to`;
-  }, { destructive: true });
+    if (option === "system") {
+      return `Moved ${kind} '${resolved}' to the system trash (restore it from there, outside Obsidian)${noUndo}`;
+    }
+    if (option === "none") {
+      return `Deleted ${kind} at '${resolved}' permanently (the vault is set to delete files instead of keeping them in a `
+        + `trash)${noUndo}`;
+    }
+    return `Moved ${kind} '${resolved}' to the trash, as the vault is set to${noUndo}`;
+  }, {
+    // Asked about only when there is something to delete: a path that names nothing fails at once, with the
+    // closest names, instead of asking the user to approve deleting a note that does not exist (2026-10-05)
+    destructiveWhen: async (args) => {
+      const path = fileOrNote(args.str("path"));
+      const { resolved, error } = checked(path);
+      if (error) return false;  // refused by the tool itself
+      return (await exists(resolved)) || Boolean((await resolveExistingNote(vault, path, scope)).note);
+    },
+  });
 
   /**
    * Other notes with *file*'s name. Links are usually written by name, and with two notes of one name Obsidian
@@ -217,6 +273,27 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
   const sameName = (file: TFile): string[] => app.vault.getMarkdownFiles()
     .filter((other) => other.path !== file.path && other.basename.toLowerCase() === file.basename.toLowerCase())
     .map((other) => other.path).sort();
+
+  /**
+   * The notes linking to *file* by its bare name — `[[name]]` in the text or the frontmatter, as TaskNotes writes
+   * projects — which Obsidian resolves to this note though another of that name may be meant. Links written with a
+   * folder are not ambiguous, and a note no one links to has no link to rewrite (#162).
+   */
+  const linkedByName = (file: TFile): string[] => {
+    const linking: string[] = [];
+    for (const [from, targets] of Object.entries(app.metadataCache.resolvedLinks)) {
+      if (from === file.path || targets[file.path] === undefined) continue;
+      const source = fileAt(from);
+      const cache = source ? app.metadataCache.getFileCache(source) : null;
+      const references = [...(cache?.links ?? []), ...(cache?.embeds ?? []), ...(cache?.frontmatterLinks ?? [])];
+      const bare = references.some((reference) => {
+        const path = parseLinktext(reference.link).path;
+        return !path.includes("/") && app.metadataCache.getFirstLinkpathDest(path, from)?.path === file.path;
+      });
+      if (bare) linking.push(from);
+    }
+    return linking.sort();
+  };
 
   /** move_note's source as the tool will find it: the path given, or the one note a fuzzy lookup lands on. */
   const moveSource = async (fromPath: string): Promise<{ source: string; error: string }> => {
@@ -228,26 +305,48 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
     return { source: found.note!, error: "" };
   };
 
+  /**
+   * Where move_note puts *source*: a new name without a folder is a rename and keeps the source's folder — the model
+   * says "rename X to Y" and passes just "Y", which once landed the note in the vault root (#229). A path with a
+   * folder is used as given, and "/Y" still asks for the root. A note gets `.md`, an attachment keeps its
+   * extension (destinationFor, #215).
+   */
+  const renameTarget = (source: string, raw: string): string => {
+    const given = raw.trim().replace(/\\/g, "/");
+    if (given.startsWith("/")) return destinationFor(source, given.replace(/^\/+/, ""));
+    const folder = source.includes("/") ? source.slice(0, source.lastIndexOf("/")) : "";
+    return destinationFor(source, !given.includes("/") && folder ? `${folder}/${given}` : given);
+  };
+
   const moveNote = defineTool("move_note", async (args) => {
-    const fromPath = noteFile(args.str("from_path"));
-    const toPath = noteFile(args.str("to_path"));
-    for (const candidate of [fromPath, toPath]) {
-      const problem = checkNoteName(candidate);
-      if (problem) return `Error: invalid note path '${candidate}': ${problem}`;
-    }
-    const destination = checked(toPath);
-    if (destination.error) return destination.error;
+    const fromPath = fileOrNote(args.str("from_path"));
+    const problem = checkNoteName(fromPath);
+    if (problem) return `Error: invalid note path '${fromPath}': ${problem}`;
     const { source, error } = await moveSource(fromPath);
     if (error) return error;
+    const toPath = renameTarget(source, args.str("to_path"));
+    const toProblem = checkNoteName(toPath);
+    if (toProblem) return `Error: invalid note path '${toPath}': ${toProblem}`;
+    const destination = checked(toPath);
+    if (destination.error) return destination.error;
     if (await exists(destination.resolved)) return `Error: a note already exists at '${toPath}'`;
     const file = app.vault.getAbstractFileByPath(source);
+    // Refused rather than left hanging until the turn times out: a minimized window never finishes it (#207)
+    if (file instanceof TFile && args.bool("update_links") && windowHidden()) return HIDDEN_WINDOW_MOVE;
     if (file instanceof TFile && args.bool("update_links")) {
       const namesake = sameName(file);
-      if (namesake.length) {
-        return `Error: another note is also called '${file.basename}' (${namesake.map((p) => `'${p}'`).join(", ")}), `
-               + `so a link written as [[${file.basename}]] may mean either note, and updating links could rewrite `
-               + "links meant for the other one. Ask the user to rename one of them in Obsidian first, or move this "
-               + "one with update_links=false.";
+      const linking = namesake.length ? linkedByName(file) : [];
+      if (linking.length) {
+        // Paths outside the agent's folders are counted, not named (#162)
+        const shown = namesake.filter(inScope).map((p) => `'${p}'`);
+        const hidden = namesake.length - shown.length;
+        if (hidden) shown.push(`${hidden} outside the folders you may use`);
+        const linkers = linking.filter(inScope);
+        const named = linkers.slice(0, 3).map((p) => `'${p}'`).join(", ");
+        return `Error: another note is also called '${file.basename}' (${shown.join(", ")}), and ${linking.length} `
+               + `note(s) link to [[${file.basename}]] by that name${named ? `, e.g. ${named}` : ""}: such a link may `
+               + "mean either note, and updating links could rewrite links meant for the other one. Ask the user to "
+               + "rename one of them in Obsidian first, or move this one with update_links=false.";
       }
     }
     await ensureFolder(app, destination.resolved.split("/").slice(0, -1).join("/"));
@@ -273,20 +372,35 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
     } else {
       await app.vault.rename(file, destination.resolved);
     }
-    // For undo: the move, then the notes whose links Obsidian rewrote — undone newest first, links before the move
-    const moved = await vault.read(destination.resolved).catch(() => null);
-    recordChange({ op: "move", path: source, before: null, after: moved, movedTo: destination.resolved });
-    for (const note of rewritten) recordChange({ op: "modify", path: note.path, before: note.before, after: note.after });
-    return `Moved note from '${source}' to '${destination.resolved}'${changed ? `; updated links in ${changed} note(s)` : ""}`;
+    // For undo: the move, then the notes whose links Obsidian rewrote — undone newest first, links before the move.
+    // Not for an attachment, which is no text (#215): moving it back with move_note puts the links back as well
+    const attachment = isAttachment(source);
+    if (!attachment) {
+      const moved = await vault.read(destination.resolved).catch(() => null);
+      recordChange({ op: "move", path: source, before: null, after: moved, movedTo: destination.resolved });
+      for (const note of rewritten) recordChange({ op: "modify", path: note.path, before: note.before, after: note.after });
+    }
+    return `Moved ${attachment ? "attachment" : "note"} from '${source}' to '${destination.resolved}'`
+      + `${changed ? `; updated links in ${changed} note(s)` : ""}${attachment ? `.${NOT_UNDONE}; move it back to undo` : ""}`;
   }, {
-    destructive: true,
+    // Asked about only when there is something to move (2026-10-05): a source that names nothing fails at once
+    destructiveWhen: async (args) => {
+      const from = fileOrNote(args.str("from_path"));
+      if (checkNoteName(from)) return false;  // refused by the tool itself
+      return Boolean((await moveSource(from)).source);
+    },
     // The question names the note that really moves: a model that passes 'Scratch' moves 'Inbox/Scratch.md'
     confirmArgs: async (args) => {
       const shown: Record<string, unknown> = { ...args };
-      if (typeof args.to_path === "string") shown.to_path = noteFile(args.to_path);
       if (typeof args.from_path === "string") {
-        const { source } = await moveSource(noteFile(args.from_path));
-        shown.from_path = source || noteFile(args.from_path);
+        const from = fileOrNote(args.from_path);
+        const { source } = await moveSource(from);
+        shown.from_path = source || from;
+        // The question names where the file really goes: a bare new name keeps its folder (#229) and an
+        // attachment its extension (#215)
+        if (typeof args.to_path === "string") shown.to_path = source ? renameTarget(source, args.to_path) : destinationFor(from, args.to_path);
+      } else if (typeof args.to_path === "string") {
+        shown.to_path = noteFile(args.to_path);
       }
       return shown;
     },

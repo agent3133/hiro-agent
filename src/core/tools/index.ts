@@ -15,6 +15,8 @@ export type { MemorySettings } from "./memoryTools";
 export interface ToolOptions {
   /** The user-profile tools, offered only when memory is on — as in Python. */
   memory?: MemorySettings | null;
+  /** The vault's config folder, where TaskNotes keeps its settings (Obsidian's `configDir`, #164). */
+  configDir?: string;
 }
 
 /** The tools that run anywhere: on the file system under Node, and on Obsidian's vault. */
@@ -22,7 +24,7 @@ export function makeTools(vault: VaultPort, scope: string[] | null = null, optio
   return inSpecOrder([
     ...makeVaultTools(vault, scope),
     ...makeSearchTools(vault, scope),
-    ...makeTaskNotesTools(vault, scope),
+    ...makeTaskNotesTools(vault, scope, options.configDir),
     ...makeMetadataTools(vault, scope),
     ...(options.memory ? makeMemoryTools(vault, options.memory) : []),
   ]);

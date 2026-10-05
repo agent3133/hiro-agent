@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FailureStreak, REASONING_ONLY_NOTE, runTurn, stepLimitNote, type TurnOptions } from "./agentLoop";
+import { declined, FailureStreak, REASONING_ONLY_NOTE, runTurn, stepLimitNote, type TurnOptions } from "./agentLoop";
 import type { ChatModel, ChatRequest, Completion } from "./llm/openaiChat";
 import { defineTool, type Tool } from "./tools/tool";
 
@@ -176,7 +176,7 @@ describe("confirmations", () => {
     ran.length = 0;
     const model = update({ path: "a.md", content: "x" });
     await runTurn(options(model, { tools: [updateNote], confirm: async () => false }));
-    expect(resultOf(model)).toBe("Error: the user declined to run 'update_note'.");
+    expect(resultOf(model)).toBe(declined("update_note"));
     expect(ran).toEqual([]);
   });
 

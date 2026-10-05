@@ -35,6 +35,20 @@ export function noteWrite(): void {
   writes += 1;
 }
 
+/**
+ * Whether Obsidian's window is minimized. While it is, `fileManager.renameFile` never finishes: it waits for the
+ * metadata cache, whose work does not run in a hidden window (#207). `vault.rename`, without link updates, is not
+ * affected.
+ */
+export function windowHidden(): boolean {
+  return activeDocument.visibilityState === "hidden";
+}
+
+/** What a move that would update links answers while the window is minimized (#207). */
+export const HIDDEN_WINDOW_MOVE = "Error: Obsidian's window is minimized, and while it is, Obsidian does not finish "
+  + "moving a note and updating the links to it. Nothing was moved. Ask the user to bring the Obsidian window up, "
+  + "then try again.";
+
 /** Some adapters hand paths back with a leading "/" when listing the root. */
 function clean(path: string): string {
   return path.replace(/^\/+/, "");
@@ -134,6 +148,40 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
       await write(path, text);
       record()?.({ op: previous === null ? "create" : "modify", path: normalizePath(path), before: previous, after: text });
     },
+    modify: async (path, change) => {
+      const normalized = normalizePath(path);
+      const file = app.vault.getAbstractFileByPath(normalized);
+      let previous = "";
+      let after: string;
+      if (file instanceof TFile) {
+        writes += 1;
+        // The change runs on the text as it is now, inside process(): a keystroke of the user's since the tool
+        // read the note is kept (#164)
+        after = await app.vault.process(file, (text) => {
+          previous = text;
+          return change(text);
+        });
+      } else {
+        // Not in the index (a dot folder): read and write, as write() does there
+        previous = await adapter.read(normalized);
+        after = change(previous);
+        await write(normalized, after);
+      }
+      record()?.({ op: "modify", path: normalized, before: previous, after });
+      return after;
+    },
+    modified: async (path) => {
+      const file = app.vault.getAbstractFileByPath(normalizePath(path));
+      return file instanceof TFile ? file.stat.mtime : ((await adapter.stat(normalizePath(path)))?.mtime ?? 0);
+    },
+    size: async (path) => {
+      const file = app.vault.getAbstractFileByPath(normalizePath(path));
+      return file instanceof TFile ? file.stat.size : ((await adapter.stat(normalizePath(path)))?.size ?? 0);
+    },
+    cachedRead: async (path) => {
+      const file = app.vault.getAbstractFileByPath(normalizePath(path));
+      return file instanceof TFile ? app.vault.cachedRead(file) : adapter.read(normalizePath(path));
+    },
     remove: async (path) => {
       writes += 1;
       const normalized = normalizePath(path);
@@ -148,6 +196,8 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
       writes += 1;
       const source = app.vault.getAbstractFileByPath(normalizePath(from));
       const target = normalizePath(to);
+      // A minimized window would leave the move hanging (#207): refused before anything changes
+      if (source instanceof TFile && windowHidden()) throw new Error(HIDDEN_WINDOW_MOVE.replace(/^Error: /, ""));
       await ensureFolder(app, target.split("/").slice(0, -1).join("/"));
       if (source instanceof TFile) await app.fileManager.renameFile(source, target);
       // Not in the index: a file in a dot folder

@@ -1,7 +1,7 @@
 // Replacing a note with create_note asks first (#157); listing leaves out notes in dot folders (#158).
 import { describe, expect, it } from "vitest";
 
-import { asksFirst, runTurn, type Confirm } from "../agentLoop";
+import { asksFirst, declined, runTurn, type Confirm } from "../agentLoop";
 import type { ChatModel, Completion } from "../llm/openaiChat";
 import { makeVault } from "../testing/vault";
 
@@ -40,7 +40,7 @@ describe("create_note replacing a note (#157)", () => {
     const { asked, result } = await turn(vault, { path: "Notes/Plan", content: "gone", overwrite: true }, false);
     expect(asked).toHaveLength(1);
     expect(asked[0].path).toBe("Notes/Plan.md");
-    expect(result).toBe("Error: the user declined to run 'create_note'.");
+    expect(result).toBe(declined("create_note"));
     expect(await vault.read("Notes/Plan.md")).toBe("the old plan");
   });
 
@@ -93,7 +93,8 @@ describe("list_notes and dot folders (#158)", () => {
     const vault = await makeVault(notes);
     const all = await vault.tool("list_notes").run({ recursive: true });
     expect(all.split("\n").sort()).toEqual(["Inbox/Idea.md", "Top.md"]);
-    expect(await vault.tool("list_notes").run({})).toBe("Top.md");
+    // The plain listing shows folders too since #159 — but no dot folder among them
+    expect(await vault.tool("list_notes").run({})).toBe("Inbox/\nProjects/\nTop.md");
   });
 
   it("lists the trash when it is named, so a deleted note can be restored", async () => {

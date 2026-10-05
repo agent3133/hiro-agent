@@ -22,7 +22,7 @@
  * so a compacted conversation forgot which connection answered it).
  */
 
-import { Document, Scalar, visit } from "yaml";
+import { Document, parseDocument, Scalar, visit } from "yaml";
 
 import { SUMMARY_PREFIX, summaryPrompt } from "./compaction";
 import { readFrontmatter } from "./frontmatter";
@@ -38,13 +38,78 @@ const SUMMARY_END = "<!-- /session-summary -->";
 /** Where the connection that answered changed; rendered on every save, skipped on load. */
 const CONNECTION_MARK = /<!-- session-connection: [^\n]*? -->/g;
 
+/** An answer's tool calls, before its text (#282); taken out again on load, so the model never sees them. */
+const TOOLS_START = "<!-- session-tools -->";
+const TOOLS_END = "<!-- /session-tools -->";
+/** How much of a call's result the note keeps: enough to see what came back, not a copy of what was read. */
+const SAVED_RESULT_CHARS = 500;
+const SAVED_ARGS_CHARS = 300;
+
 /** A user or assistant message; the summary of a compacted conversation comes back as a system message. */
 export type SessionMessage = Extract<ChatMessage, { role: "system" | "user" | "assistant" }>;
+
+/** A tool call kept with the answer it led to (#282). */
+export interface SavedCall {
+  name: string;
+  /** The arguments as JSON, cut to SAVED_ARGS_CHARS. */
+  args: string;
+  /** The result as text, cut to SAVED_RESULT_CHARS, the full length named. */
+  result: string;
+  error: boolean;
+}
+
+/** Each answer's tool calls, by the answer's message object. */
+export type CallsByAnswer = Map<SessionMessage, SavedCall[]>;
+
+/** A call as the note keeps it: its arguments and result cut short, an image's bytes not at all. */
+export function savedCall(name: string, input: unknown, result: string, error: boolean): SavedCall {
+  const cut = (text: string, limit: number): string =>
+    text.length > limit ? `${text.slice(0, limit)}… [${text.length} characters]` : text;
+  let args: string;
+  try {
+    args = JSON.stringify(input ?? {});
+  } catch {
+    args = "{}";
+  }
+  return { name, args: cut(args, SAVED_ARGS_CHARS), result: cut(result.replace(/data:[^;\s]+;base64,\S+/g, "[image]"), SAVED_RESULT_CHARS), error };
+}
+
+/** An answer's calls as folded callouts, one per call, between the tools marks. */
+function renderCalls(calls: SavedCall[]): string {
+  const callouts = calls.map((call) => {
+    const head = `> [!tool]- ${call.name} ${call.args}${call.error ? " — failed" : ""}`;
+    const body = call.result.split("\n").map((line) => (line ? `> ${line}` : ">"));
+    return [head, ...body].join("\n");
+  });
+  return `${TOOLS_START}\n${callouts.join("\n\n")}\n${TOOLS_END}`;
+}
+
+/** The calls a tools block holds; what is not a callout is left out. */
+function parseCalls(block: string): SavedCall[] {
+  const calls: SavedCall[] = [];
+  for (const callout of block.split(/\n\s*\n/)) {
+    const lines = callout.trim().split("\n");
+    const head = /^> \[!tool\]- (\S+) (.*?)( — failed)?$/.exec(lines[0] ?? "");
+    if (!head) continue;
+    calls.push({ name: head[1], args: head[2], error: Boolean(head[3]),
+                 result: lines.slice(1).map((line) => line.replace(/^> ?/, "")).join("\n") });
+  }
+  return calls;
+}
+
+/** An assistant message's text without its tools block, and the calls the block held. */
+function splitCalls(content: string): { content: string; calls: SavedCall[] } {
+  const match = new RegExp(`^${escape(TOOLS_START)}\\n([\\s\\S]*?)\\n${escape(TOOLS_END)}\\s*`).exec(content);
+  if (!match) return { content, calls: [] };
+  return { content: content.slice(match[0].length).trim(), calls: parseCalls(match[1]) };
+}
 
 export interface ConnectionChange { exchange: number; connection: string; model: string }
 
 export interface SessionSummary {
   name: string;
+  /** What the user called it (#286); none until they rename it. */
+  title?: string;
   agent: string;
   model: string;
   connection?: string;
@@ -65,6 +130,23 @@ export function sanitiseName(name: string): string {
 
 export function sessionPath(name: string): string {
   return `${SESSION_DIR}/${sanitiseName(name)}.md`;
+}
+
+/**
+ * Give a kept conversation a title (#286): what the user typed, as typed, in its note's frontmatter. The note keeps
+ * its file name, which is the conversation's identifier; a blank title takes the title away again. A conversation
+ * not written yet gets it with its first save (SaveOptions.title).
+ */
+export async function setSessionTitle(vault: VaultPort, name: string, title: string): Promise<void> {
+  const path = sessionPath(name);
+  if (!(await vault.isFile(path))) return;
+  const text = await readNote(vault, path);
+  const match = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  if (!match) return;
+  const document = parseDocument(match[1]);
+  if (title.trim()) document.set("title", title.trim());
+  else document.delete("title");
+  await vault.write(path, `---\n${document.toString({ lineWidth: 0, indentSeq: false })}---\n${text.slice(match[0].length)}`);
 }
 
 /** Python's `datetime.now().isoformat(timespec="seconds")`. */
@@ -110,6 +192,13 @@ function summaryOf(text: string): string | null {
   return match ? match[1].trim() : null;
 }
 
+/** A message's text as the note keeps it: an answer with its tool calls first, secrets redacted in both. */
+function withCalls(message: SessionMessage, calls?: CallsByAnswer): string {
+  const saved = message.role === "assistant" ? calls?.get(message) : undefined;
+  const text = saved?.length ? `${renderCalls(saved)}\n\n${message.content}` : message.content;
+  return redactSecrets(text);
+}
+
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -119,14 +208,19 @@ export interface SaveOptions {
   model: string | null;
   connection?: string | null;
   connections?: ConnectionChange[];
+  /** The title to give it (#286); without one, a title the note has already stays. */
+  title?: string;
+  /** Each answer's tool calls, written before its text (#282); an answer without any is written as before. */
+  calls?: CallsByAnswer;
 }
 
-/** Write the conversation to its note, keeping its created time and summary — `save_session`. */
+/** Write the conversation to its note, keeping its created time, title and summary — `save_session`. */
 export async function saveSession(vault: VaultPort, name: string, messages: SessionMessage[],
                                   options: SaveOptions): Promise<void> {
   const path = sessionPath(name);
   const stamp = now();
   let created = stamp;
+  let title = options.title;
   let summary: string | null = null;
   let compactedAt: string | undefined;
   let compactedExchanges: number | undefined;
@@ -134,6 +228,7 @@ export async function saveSession(vault: VaultPort, name: string, messages: Sess
     const existing = await readNote(vault, path);
     const meta = frontmatterOf(existing);
     if (meta.created !== undefined) created = String(meta.created);
+    if (title === undefined && typeof meta.title === "string") title = meta.title;
     if (meta.compacted_at !== undefined) compactedAt = String(meta.compacted_at);
     if (meta.compacted_exchanges !== undefined) compactedExchanges = Number(meta.compacted_exchanges);
     summary = summaryOf(existing);
@@ -143,6 +238,7 @@ export async function saveSession(vault: VaultPort, name: string, messages: Sess
     session: sanitiseName(name), agent: options.agent, model: options.model ?? "", connection: options.connection ?? "",
     created, updated: stamp, exchanges: conversation.filter((m) => m.role === "user").length,
   };
+  if (title) frontmatter.title = title;
   if (options.connections?.length) frontmatter.connections = options.connections;
   if (compactedAt !== undefined) frontmatter.compacted_at = compactedAt;
   if (compactedExchanges !== undefined) frontmatter.compacted_exchanges = compactedExchanges;
@@ -159,7 +255,7 @@ export async function saveSession(vault: VaultPort, name: string, messages: Sess
       if (mark) parts.push(`\n<!-- session-connection: ${mark} -->\n`);
     }
     // The note syncs with the vault; a key pasted into the chat does not go with it
-    parts.push(`\n${message.role === "user" ? HUMAN : ASSISTANT}\n${redactSecrets(message.content)}\n`);
+    parts.push(`\n${message.role === "user" ? HUMAN : ASSISTANT}\n${withCalls(message, options.calls)}\n`);
   }
   await vault.write(path, parts.join(""));
 }
@@ -169,8 +265,18 @@ export async function saveSession(vault: VaultPort, name: string, messages: Sess
  * always first as a system message — `load_session`.
  */
 export async function loadSession(vault: VaultPort, name: string, tokenBudget?: number): Promise<SessionMessage[]> {
+  return (await loadSessionWithCalls(vault, name, tokenBudget)).messages;
+}
+
+/**
+ * loadSession, with each answer's saved tool calls (#282) by its message. The calls are taken out of the answers'
+ * text, so the messages, and what the model gets back, are the same with or without them.
+ */
+export async function loadSessionWithCalls(vault: VaultPort, name: string, tokenBudget?: number):
+    Promise<{ messages: SessionMessage[]; calls: CallsByAnswer }> {
+  const calls: CallsByAnswer = new Map();
   const path = sessionPath(name);
-  if (!(await vault.isFile(path))) return [];
+  if (!(await vault.isFile(path))) return { messages: [], calls };
   let text = (await readNote(vault, path)).replace(/^---\n[\s\S]*?\n---\n/, "");
   const summaryMatch = new RegExp(`${escape(SUMMARY_START)}\\n([\\s\\S]*?)\\n${escape(SUMMARY_END)}`).exec(text);
   let summary: string | null = null;
@@ -183,7 +289,15 @@ export async function loadSession(vault: VaultPort, name: string, tokenBudget?: 
   let messages: SessionMessage[] = [];
   for (let i = 0; i < pieces.length; i++) {
     if (pieces[i] !== HUMAN && pieces[i] !== ASSISTANT) continue;
-    messages.push({ role: pieces[i] === HUMAN ? "user" : "assistant", content: (pieces[i + 1] ?? "").trim() });
+    const text = (pieces[i + 1] ?? "").trim();
+    if (pieces[i] === HUMAN) {
+      messages.push({ role: "user", content: text });
+    } else {
+      const { content, calls: saved } = splitCalls(text);
+      const message: SessionMessage = { role: "assistant", content };
+      messages.push(message);
+      if (saved.length) calls.set(message, saved);
+    }
     i += 1;
   }
   if (tokenBudget !== undefined) {
@@ -196,7 +310,8 @@ export async function loadSession(vault: VaultPort, name: string, tokenBudget?: 
     }
     messages = kept.reverse();
   }
-  return summary !== null ? [{ role: "system", content: `${SUMMARY_PREFIX}${summary}` }, ...messages] : messages;
+  return { messages: summary !== null ? [{ role: "system", content: `${SUMMARY_PREFIX}${summary}` }, ...messages] : messages,
+           calls };
 }
 
 /** A session note's frontmatter, or {} — `session_meta`. */
@@ -215,14 +330,16 @@ export async function listSessions(vault: VaultPort): Promise<SessionSummary[]> 
     try {
       const meta = frontmatterOf(await readNote(vault, note));
       // The file names the session, not its frontmatter: a note arriving by sync decides nothing about paths (#135)
-      found.push({ name: stem, agent: String(meta.agent ?? ""), model: String(meta.model ?? ""),
+      found.push({ name: stem, ...(typeof meta.title === "string" && meta.title ? { title: meta.title } : {}),
+                   agent: String(meta.agent ?? ""), model: String(meta.model ?? ""),
                    connection: String(meta.connection ?? ""), exchanges: Number(meta.exchanges ?? 0) || 0,
                    updated: String(meta.updated ?? "") });
     } catch {
       found.push({ name: stem, agent: "", model: "", exchanges: 0, updated: "" });
     }
   }
-  return found.sort((a, b) => (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : 0));
+  // The last change first; a note without one (written by hand) last, the newest name first among those
+  return found.sort((a, b) => (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
 }
 
 export async function deleteSession(vault: VaultPort, name: string): Promise<boolean> {
@@ -241,7 +358,8 @@ export async function compactSession(vault: VaultPort, name: string, summarize: 
   const path = sessionPath(name);
   const existing = (await vault.isFile(path)) ? await readNote(vault, path) : "";
   const previous = summaryOf(existing);
-  const raw = (await loadSession(vault, name)).filter((m) => m.role !== "system");
+  const loaded = await loadSessionWithCalls(vault, name);
+  const raw = loaded.messages.filter((m) => m.role !== "system");
   const pairs: [SessionMessage, SessionMessage][] = [];
   for (let i = 0; i < raw.length - 1;) {
     if (raw[i].role === "user" && raw[i + 1].role === "assistant") {
@@ -267,9 +385,13 @@ export async function compactSession(vault: VaultPort, name: string, summarize: 
     // Same meaning as saveSession: exchanges kept verbatim in the note
     exchanges: recent.length, compacted_at: stamp, compacted_exchanges: old.length,
   };
+  if (typeof meta.title === "string" && meta.title) frontmatter.title = meta.title;
   if (Array.isArray(meta.connections) && meta.connections.length) frontmatter.connections = meta.connections;
   const parts = [`---\n${dumpYaml(frontmatter)}---\n`, `\n${SUMMARY_START}\n${summary}\n${SUMMARY_END}\n`];
-  for (const [human, assistant] of recent) parts.push(`\n${HUMAN}\n${human.content}\n`, `\n${ASSISTANT}\n${assistant.content}\n`);
+  // The exchanges kept word for word keep their tool calls too (#282)
+  for (const [human, assistant] of recent) {
+    parts.push(`\n${HUMAN}\n${human.content}\n`, `\n${ASSISTANT}\n${withCalls(assistant, loaded.calls)}\n`);
+  }
   await vault.write(path, parts.join(""));
   return old.length;
 }

@@ -22,11 +22,13 @@ import { compactHistory, dueForCompaction, estimateMessages, KEEP_SHARE, recentT
          splitHistory, summariseLimit } from "../core/compaction";
 import { serially } from "../core/serial";
 import { Journal, type Turn } from "../core/journal";
-import { OpenAiChat, type ChatModel } from "../core/llm/openaiChat";
-import { scopePrompt } from "../core/paths";
+import { OpenAiChat, type ChatModel, type LlmSettings } from "../core/llm/openaiChat";
+import { OpenAiResponses } from "../core/llm/openaiResponses";
+import { scopePrompt, toolConventions } from "../core/paths";
 import { promptContext, renderPrompt } from "../core/prompt";
 import {
-  compactSession, type ConnectionChange, deleteSession, listSessions, loadSession, sanitiseName, saveSession, type SessionMessage, sessionMeta, type SessionSummary,
+  type CallsByAnswer, compactSession, type ConnectionChange, deleteSession, listSessions, loadSessionWithCalls, sanitiseName,
+  savedCall, type SavedCall, saveSession, setSessionTitle, type SessionMessage, sessionMeta, type SessionSummary,
 } from "../core/sessions";
 import { readUserProfile } from "../core/tools/memoryTools";
 import type { Tool } from "../core/tools/tool";
@@ -61,6 +63,19 @@ interface TurnOptions {
   context?: Record<string, unknown>;
   /** false: the conversation is kept in memory under `session` for follow-ups, but never written to a note. */
   keep?: boolean;
+  /**
+   * The chat view asking, for a conversation without a session: each view's unkept conversation is its own, so two
+   * chats side by side never share a history (#153). Without it, the one unnamed conversation (agent:ask).
+   */
+  view?: string;
+}
+
+/**
+ * The key an unkept conversation of chat view *view* is held under (#153): never a session name, which cannot
+ * start with a NUL, and never written to a note. "" without a view.
+ */
+export function scratchKey(view?: string): string {
+  return view ? `\u0000${view}` : "";
 }
 
 /** One conversation: what goes into the next prompt, what is only in its note, and who answered it. */
@@ -71,6 +86,30 @@ interface Conversation {
   connections: ConnectionChange[];
   pendingCompact: boolean;
   last?: { agent: string; model: string; connection: string };
+  /** What the user called it (#286), written with the next save. */
+  title?: string;
+  /** Each answer's tool calls, saved with the note when the setting is on (#282). */
+  calls: CallsByAnswer;
+}
+
+/** An agent's unsaved edits in the Agents tab, previewed before they are saved (#67). */
+export interface PromptDraft {
+  prompt?: string;
+  tools?: string[];
+  vault_scope?: string[];
+  llm_profile?: string | null;
+  model?: string | null;
+}
+
+/** The system prompt as the next turn would send it, and what went into it (#67). */
+export interface PromptAsSent {
+  text: string;
+  /** Template expressions left as written: the plugin fills in plain placeholders only. */
+  unsupported: string[];
+  /** The model named in it; empty when neither the settings nor the server name one. */
+  model: string;
+  /** Whether the MCP tools in it come from this device's last listing rather than a live one. */
+  mcpFromCache: boolean;
 }
 
 /** Where the in-plugin agent gets its agents and connections, and how it reaches keys and servers. */
@@ -108,6 +147,8 @@ export class InProcessAgent {
   private readonly oneAtATime = serially();
   /** Open conversations by session name; "" is the one that is not kept. */
   private readonly conversations = new Map<string, Conversation>();
+  /** Titles given to conversations not started yet, by name (#286). */
+  private readonly pendingTitles = new Map<string, string>();
   /** Confirmations waiting for the user, by call id, with the turn they belong to. */
   private readonly pending = new Map<string, { turn: string; answer: (approved: boolean) => void }>();
   private journal: Journal | null = null;
@@ -180,6 +221,65 @@ export class InProcessAgent {
     return turn ? { turn: turn.id, files: this.journal!.paths(turn) } : null;
   }
 
+  /**
+   * The whole system prompt a turn of *agent* sends: its template filled in, then what the runner appends — the
+   * folder restriction, the MCP tools, the features, and the user profile when memory goes into the prompt. One
+   * place for turns and for the Agents tab's "Show as sent" (#67), so the preview cannot drift from the real thing.
+   */
+  private async systemPrompt(agent: { name: string; prompt: string; tools: string[]; vaultScope: string[] },
+                             model: string, values: Record<string, unknown>, settings: ToolsetOptions,
+                             tools: Tool[]): Promise<{ text: string; unsupported: string[] }> {
+    const adapter = this.app.vault.adapter;
+    const vaultPath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
+    const rendered = renderPrompt(agent.prompt, promptContext(vaultPath, agent.name, model));
+    // A restricted agent is told it is, so a note outside its folders is "out of reach", not "does not exist"
+    let text = rendered.text + toolConventions(tools.map((tool) => tool.name)) + scopePrompt(agent.vaultScope)
+      + mcpPrompt(tools) + featurePrompt(agent.tools, values);
+    // What the agent knows about the user, when memory is on and meant for the prompt (runner.py)
+    if (settings.memory?.inject) {
+      const profileText = await readUserProfile(this.vault, settings.memory.profilePath, settings.memory.maxProfileTokens);
+      if (profileText) text += `\n\n---\n## What you know about the user\n\n${profileText}\n---`;
+    }
+    return { text, unsupported: rendered.unsupported };
+  }
+
+  /**
+   * *name*'s system prompt as its next turn would send it (#67), with *draft*'s unsaved prompt, tools and folders
+   * when given. Nothing runs: the template language has no shell(), and MCP tools come from the listing this device
+   * kept, not from starting the servers. The model is the one the agent's connection names, or its server reports.
+   */
+  async promptAsSent(name: string, draft?: PromptDraft): Promise<PromptAsSent> {
+    const saved = await this.source.catalog.get(name);
+    if (!saved) throw new Error(`no agent called '${name}'`);
+    const agent = {
+      ...saved, prompt: draft?.prompt ?? saved.prompt, tools: draft?.tools ?? saved.tools,
+      vaultScope: draft?.vault_scope ?? saved.vaultScope,
+      llmProfile: draft?.llm_profile === undefined ? saved.llmProfile : (draft.llm_profile ?? ""),
+      model: draft?.model === undefined ? saved.model : draft.model,
+    };
+    const values = this.source.values();
+    const known = profileSummaries(values).map((p) => p.name);
+    const chosen = agent.llmProfile && known.includes(agent.llmProfile) ? agent.llmProfile : "";
+    const resolved = resolveConnection(values, chosen, this.source.env, {
+      model: agent.model, temperature: agent.temperature, enableThinking: agent.enableThinking,
+      samplingPreset: agent.samplingPreset,
+    });
+    let model = resolved.model;
+    try {
+      model = (await detectConnection(resolved, this.source.fetchJson, this.detected)).model;
+    } catch {
+      // The server is not answering: the model the settings name, if any
+    }
+    const settings = await this.options();
+    const scoped = agent.vaultScope.length > 0;
+    const ported = obsidianToolset(this.app, scoped ? agent.vaultScope : null, settings);
+    const mcpFromCache = wantsMcp(agent.tools, scoped);
+    const mcpTools = mcpFromCache ? this.source.mcp.knownTools(mcpServers(values)) : [];
+    const tools = assembleTools(agent.tools, ported, mcpTools, scoped);
+    const { text, unsupported } = await this.systemPrompt(agent, model, values, settings, tools);
+    return { text, unsupported, model, mcpFromCache };
+  }
+
   private async run(turn: string, prompt: string, options: TurnOptions, handlers: TurnHandlers,
                     signal: AbortSignal): Promise<void> {
     const catalog = this.source.catalog;
@@ -229,25 +329,19 @@ export class InProcessAgent {
     }
     // Exactly the tools the agent lists, in its order — none when it lists none (assemble_tools, runner.py)
     const tools = assembleTools(agent.tools, ported, mcpTools, scoped);
-    const adapter = this.app.vault.adapter;
-    const vaultPath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : this.app.vault.getName();
-    let { text: systemPrompt } = renderPrompt(agent.prompt, promptContext(vaultPath, agent.name, model));
-    // A restricted agent is told it is, so a note outside its folders is "out of reach", not "does not exist"
-    systemPrompt += scopePrompt(agent.vaultScope) + mcpPrompt(tools) + featurePrompt(agent.tools, values);
-    // What the agent knows about the user, when memory is on and meant for the prompt (runner.py)
-    if (settings.memory?.inject) {
-      const profileText = await readUserProfile(this.vault, settings.memory.profilePath, settings.memory.maxProfileTokens);
-      if (profileText) systemPrompt += `\n\n---\n## What you know about the user\n\n${profileText}\n---`;
-    }
+    const { text: systemPrompt } = await this.systemPrompt(agent, model, values, settings, tools);
 
-    const key = options.session || "";
+    const key = options.session || scratchKey(options.view);
     const window = connection.contextWindow;
     const conversation = await this.conversation(key, window, options.keep !== false);
-    const llm: ChatModel = new OpenAiChat({
+    const llmSettings: LlmSettings = {
       baseUrl: connection.baseUrl, model, apiKey: connection.apiKey, temperature: connection.temperature,
       topP: connection.topP, topK: connection.topK, minP: connection.minP, presencePenalty: connection.presencePenalty,
       repetitionPenalty: connection.repetitionPenalty, maxTokens: connection.maxTokens,
-    });
+      serviceTier: connection.serviceTier, serviceTierFallback: connection.serviceTierFallback,
+      reasoningEffort: connection.reasoningEffort, log: (line) => this.source.log(line),
+    };
+    const llm: ChatModel = connection.api === "responses" ? new OpenAiResponses(llmSettings) : new OpenAiChat(llmSettings);
     const started = Date.now();
     // Summarised by size in the window (#154): before the request when the history no longer fits well — another,
     // smaller model chosen, say — and after the answer when the conversation has grown past the share
@@ -264,6 +358,9 @@ export class InProcessAgent {
     this.journal?.begin(prompt);
     let toolCalls = 0;
     let peak = 0;
+    // This answer's calls, for its conversation's note when the setting is on (#282)
+    const calls = new Map<string, SavedCall>();
+    const inputs = new Map<string, { name: string; input: unknown }>();
     const attempt = (): ReturnType<typeof runTurn> => runTurn({
       model: llm, tools, systemPrompt, prompt: withContext(prompt, options.context),
       history: conversation.loaded,
@@ -275,13 +372,19 @@ export class InProcessAgent {
         // The most the answer took along the way; the meter shows it only in its tooltip (#154)
         onUsage: (tokens) => { peak = Math.max(peak, tokens); },
         onSetAside: (total) => handlers.onSetAside?.(total),
+        onServiceTier: (tier) => handlers.onServiceTier?.(tier),
         onToken: handlers.onToken,
         onThinking: handlers.onThinking,
         onToolCall: (callId, name, input) => {
           toolCalls += 1;
+          inputs.set(callId, { name, input });
           handlers.onToolCall({ callId, name, input });
         },
-        onToolResult: handlers.onToolResult,
+        onToolResult: (callId, result, isError) => {
+          const call = inputs.get(callId);
+          if (call) calls.set(callId, savedCall(call.name, call.input, result, isError));
+          handlers.onToolResult?.(callId, result, isError);
+        },
       },
     });
     // The conversation outgrew the window before anything ran: summarised, and asked once more
@@ -291,6 +394,8 @@ export class InProcessAgent {
     // Closed before the conversation is saved: the session note is not one of the turn's changes
     const changed = this.closeTurn();
     conversation.loaded = result.history as SessionMessage[];
+    const answer = conversation.loaded[conversation.loaded.length - 1];
+    if (settings.saveToolCalls && calls.size && answer?.role === "assistant") conversation.calls.set(answer, [...calls.values()]);
     conversation.last = { agent: agent.name, model, connection: profileName };
     await this.save(conversation);
     // By what the next message carries — the questions and answers, not this answer's tool results, which are not
@@ -326,8 +431,12 @@ export class InProcessAgent {
   private async conversation(key: string, contextWindow: number, keep = true): Promise<Conversation> {
     const open = this.conversations.get(key);
     if (open) return open;
-    const conversation: Conversation = { name: keep && key ? key : null, loaded: [], unloaded: [], connections: [],
-                                         pendingCompact: false };
+    // A view's own unkept conversation (scratchKey) is never named, so never written
+    const named = keep && key && !key.startsWith("\u0000");
+    const conversation: Conversation = { name: named ? key : null, loaded: [], unloaded: [], connections: [],
+                                         pendingCompact: false, calls: new Map(),
+                                         title: this.pendingTitles.get(key) };
+    this.pendingTitles.delete(key);
     if (conversation.name) await this.load(conversation, contextWindow);
     this.conversations.set(key, conversation);
     return conversation;
@@ -335,11 +444,15 @@ export class InProcessAgent {
 
   private async load(conversation: Conversation, contextWindow: number): Promise<void> {
     const name = conversation.name!;
-    const full = (await loadSession(this.vault, name)).filter((m) => m.role !== "system");
-    const loaded = await loadSession(this.vault, name, Math.floor(contextWindow * HISTORY_SHARE));
+    const all = await loadSessionWithCalls(this.vault, name);
+    const recent = await loadSessionWithCalls(this.vault, name, Math.floor(contextWindow * HISTORY_SHARE));
+    const full = all.messages.filter((m) => m.role !== "system");
+    const loaded = recent.messages;
     const kept = loaded.filter((m) => m.role !== "system").length;
     conversation.loaded = loaded;
     conversation.unloaded = full.slice(0, full.length - kept);
+    // The saved calls stay with their answers, whichever list holds them; they are never part of the history sent
+    conversation.calls = new Map([...all.calls, ...recent.calls]);
     const history = (await sessionMeta(this.vault, name)).connections;
     conversation.connections = Array.isArray(history) ? history as ConnectionChange[] : [];
   }
@@ -355,7 +468,8 @@ export class InProcessAgent {
       conversation.connections.push({ exchange, connection, model });
     }
     await saveSession(this.vault, conversation.name, messages,
-                      { agent, model, connection, connections: conversation.connections });
+                      { agent, model, connection, connections: conversation.connections, calls: conversation.calls,
+                        title: conversation.title });
     if (Math.floor(messages.length / 2) >= COMPACT_AFTER_EXCHANGES) conversation.pendingCompact = true;
   }
 
@@ -390,9 +504,9 @@ export class InProcessAgent {
     }
   }
 
-  /** A new conversation that is not kept starts empty. */
-  forget(session = ""): void {
-    this.conversations.delete(session);
+  /** A new conversation that is not kept starts empty: chat view *view*'s, leaving the other views' alone (#153). */
+  forget(view?: string): void {
+    this.conversations.delete(scratchKey(view));
   }
 
   async sessions(): Promise<SessionSummary[]> {
@@ -400,10 +514,10 @@ export class InProcessAgent {
   }
 
   /** A conversation's messages and the connection that answered it last — as `GET /sessions/{name}`. */
-  async session(name: string): Promise<{ messages: { role: string; content: string }[]; connection?: string;
+  async session(name: string): Promise<{ messages: { role: string; content: string; calls?: SavedCall[] }[]; connection?: string;
                                          model?: string; connection_exists?: boolean;
                                          summary?: { text: string; exchanges: number } }> {
-    const messages = await loadSession(this.vault, name);
+    const { messages, calls } = await loadSessionWithCalls(this.vault, name);
     if (!messages.length && !(await this.vault.isFile(`.sessions/${sanitiseName(name)}.md`))) {
       throw new Error(`no session '${name}'`);
     }
@@ -414,7 +528,8 @@ export class InProcessAgent {
     const { summary } = splitHistory(messages);
     return {
       messages: messages.filter((m) => m.role !== "system")
-        .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content })),
+        .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.content,
+                       ...(calls.get(m) ? { calls: calls.get(m) } : {}) })),
       connection, model: String(meta.model ?? ""),
       connection_exists: Boolean(connection) && profiles.some((p) => p.name === connection),
       ...(summary !== null ? { summary: { text: summary, exchanges: Number(meta.compacted_exchanges ?? 0) } } : {}),
@@ -432,12 +547,28 @@ export class InProcessAgent {
    * Start or stop keeping the conversation that is open, without losing it — `name_session` (ws.py). Naming one
    * takes its messages along and writes the note at once; unnaming stops saving and leaves the note alone.
    */
-  nameSession(current: string, name: string): void {
-    const conversation = this.conversations.get(current);
-    if (!conversation || current === name) return;
-    this.conversations.delete(current);
+  /**
+   * Call conversation *name* *title* (#286): in its note when there is one, and with the next save. The name, the
+   * note's file name, stays. A blank title takes the title away. A conversation not started yet gets it when it is.
+   */
+  async titleSession(name: string, title: string): Promise<void> {
+    const wanted = title.trim();
+    const open = this.conversations.get(name);
+    if (open) open.title = wanted || undefined;
+    else if (wanted) this.pendingTitles.set(name, wanted);
+    else this.pendingTitles.delete(name);
+    await setSessionTitle(this.vault, name, wanted);
+  }
+
+  nameSession(current: string, name: string, view?: string): void {
+    // An unkept conversation is the view's own (#153): "" stands for it on either side
+    const from = current || scratchKey(view);
+    const to = name || scratchKey(view);
+    const conversation = this.conversations.get(from);
+    if (!conversation || from === to) return;
+    this.conversations.delete(from);
     conversation.name = name || null;
-    this.conversations.set(name, conversation);
+    this.conversations.set(to, conversation);
     if (name) void this.save(conversation);
   }
 

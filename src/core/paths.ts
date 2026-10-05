@@ -173,3 +173,42 @@ export function hasSuffix(path: string): boolean {
   const dot = name.lastIndexOf(".");
   return dot > 0 && dot < name.length - 1;
 }
+
+/**
+ * *text* lowercased with its letters folded to their base form — "Büroumzug" → "buroumzug", "Straße" → "strasse" —
+ * for matching a name a model wrote without its accents (#164).
+ */
+export function fold(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}+/gu, "").replace(/ß/g, "ss").toLowerCase().normalize("NFC");
+}
+
+/**
+ * The system prompt's paragraph on how the note tools take paths and which one finds what — said once here, for
+ * every agent with note tools, rather than in each tool's description or only in the bundled assistant (#165).
+ * Empty for an agent without them.
+ */
+export function toolConventions(tools: string[]): string {
+  const has = new Set(tools);
+  const pathTools = ["read_note", "read_notes", "edit_note", "update_note", "append_to_note", "move_note",
+                     "delete_note", "get_metadata", "update_metadata"];
+  const ways: string[] = [];
+  if (has.has("find_notes")) ways.push("find_notes by name");
+  if (has.has("search_vault")) ways.push("search_vault by content");
+  if (has.has("list_notes")) ways.push("list_notes by folder");
+  const parts: string[] = [];
+  if (pathTools.some((name) => has.has(name))) {
+    parts.push("Note paths are relative to the vault and .md is optional; a note's name alone is enough when it is unique.");
+  }
+  if (ways.length > 1) parts.push(`To find a note, use ${ways.join(", ")}.`);
+  // The note tools do not list images, PDFs and the like, which a model then took for missing (#235)
+  if (has.has("list_attachments")) {
+    parts.push("Files that are not notes (images, PDFs, Office files, recordings) are found with list_attachments"
+               + (has.has("read_attachment") ? " and read with read_attachment." : "."));
+  }
+  // Small models edited the frontmatter as text, removing a property with edit_note in 11 of 20 probe runs (#246)
+  if (has.has("update_metadata") && (has.has("edit_note") || has.has("update_note"))) {
+    parts.push("Change a note's properties with update_metadata (to remove one, pass the value null); edit_note is "
+               + "for the text below them.");
+  }
+  return parts.length ? `\n\n---\n${parts.join(" ")}\n---` : "";
+}

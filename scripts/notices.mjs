@@ -13,7 +13,8 @@ const LICENSE_FILES = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "licen
 const { metafile } = await esbuild.build({
   entryPoints: ["src/main.ts"], bundle: true, write: false, format: "cjs", platform: "node", target: "es2022",
   metafile: true, logLevel: "silent",
-  external: ["obsidian", "electron", "node:*"],
+  // As esbuild.config.mjs: Obsidian provides CodeMirror, so it is not bundled and its license is not ours to carry
+  external: ["obsidian", "electron", "@codemirror/state", "@codemirror/view", "node:*"],
 });
 
 const names = new Set();

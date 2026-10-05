@@ -24,7 +24,8 @@ ${notices}*/` },
   legalComments: "inline",
   logLevel: "info",
   // Provided by Obsidian at runtime; bundling them would ship a second copy of the app's own modules.
-  external: ["obsidian", "electron", "node:child_process", "node:crypto", "node:fs", "node:fs/promises", "node:http", "node:https", "node:os", "node:path"],
+  // Obsidian supplies CodeMirror; a second copy would break editor extensions (#218)
+  external: ["obsidian", "electron", "@codemirror/state", "@codemirror/view", "node:child_process", "node:crypto", "node:fs", "node:fs/promises", "node:http", "node:https", "node:os", "node:path"],
 });
 
 if (watch) {

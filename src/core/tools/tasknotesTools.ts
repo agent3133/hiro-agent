@@ -14,7 +14,8 @@ import { basename } from "../paths";
 import { vaultNotes, type VaultPort } from "../vault";
 import { defineTool, type Tool } from "./tool";
 
-export const SETTINGS_PATH = ".obsidian/plugins/tasknotes/data.json";
+/** Where TaskNotes keeps its settings, in the vault's config folder — `.obsidian` unless renamed (#164). */
+export const settingsPath = (configDir = ".obsidian"): string => `${configDir}/plugins/tasknotes/data.json`;
 /** Rows per listing: a vault with a hundred tasks answers "list them" with a wall models give up on. */
 export const TASK_LIST_LIMIT = 30;
 
@@ -26,11 +27,11 @@ export class TaskNotesSettings {
   completedStatuses: string[] = ["done"];
   fields: Record<string, string> = {};
 
-  static async read(vault: VaultPort): Promise<TaskNotesSettings> {
+  static async read(vault: VaultPort, configDir = ".obsidian"): Promise<TaskNotesSettings> {
     const settings = new TaskNotesSettings();
     let data: Record<string, unknown>;
     try {
-      data = JSON.parse(await vault.read(SETTINGS_PATH)) as Record<string, unknown>;
+      data = JSON.parse(await vault.read(settingsPath(configDir))) as Record<string, unknown>;
     } catch {
       return settings; // no plugin settings: the defaults are what TaskNotes ships with
     }
@@ -92,7 +93,7 @@ function today(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = null): Tool[] {
+export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = null, configDir = ".obsidian"): Tool[] {
   interface TaskNote { rel: string; meta: Record<string, unknown> }
 
   const taskNotes = async (settings: TaskNotesSettings): Promise<TaskNote[]> => {
@@ -132,7 +133,7 @@ export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = nu
   };
 
   const listTaskNotes = defineTool("list_tasknotes", async (args) => {
-    const settings = await TaskNotesSettings.read(vault);
+    const settings = await TaskNotesSettings.read(vault, configDir);
     const status = args.str("status");
     const project = args.str("project");
     const unassigned = ["none", "no project", "unassigned", "-"].includes(project.trim().toLowerCase());
@@ -181,7 +182,7 @@ export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = nu
   });
 
   const completeTaskNote = defineTool("complete_tasknote", async (args) => {
-    const settings = await TaskNotesSettings.read(vault);
+    const settings = await TaskNotesSettings.read(vault, configDir);
     const { rel, error } = await find(settings, args.str("task"));
     if (error) return error;
     const text = await vault.read(rel);

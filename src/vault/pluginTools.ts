@@ -15,6 +15,7 @@ import { moment, type App } from "obsidian";
 import { checkNoteName, noteFile, PathError, safeResolve, stem } from "../core/paths";
 import { defineTool, type Tool } from "../core/tools/tool";
 import type { VaultPort } from "../core/vault";
+import { noteWrite, recordChange } from "./obsidianVault";
 
 /**
  * Obsidian's bundled moment. Its declaration is a namespace import, which TypeScript will not call under
@@ -72,7 +73,10 @@ export function makePluginTools(app: App, vault: VaultPort, scope: string[] | nu
     if (!day.isValid()) return `Error: '${wanted}' is not a date; give it as YYYY-MM-DD`;
     const folder = text(settings.folder, "").replace(/^\/+|\/+$/g, "");
     const name = day.format(text(settings.format, "YYYY-MM-DD"));
-    return `${folder ? `${folder}/` : ""}${name}.md`;
+    const path = `${folder ? `${folder}/` : ""}${name}.md`;
+    // The path alone on its first line, as models copy it; a note that does not exist yet says so, rather than
+    // letting the model read it and fail (2026-10-05)
+    return (await vault.isFile(path)) ? path : `${path}\n[Not created yet.]`;
   });
 
   /** The template folder and the templates in it, by name relative to the folder, without `.md`. */
@@ -152,6 +156,11 @@ export function makePluginTools(app: App, vault: VaultPort, scope: string[] | nu
     }
     const result = created as { file?: { path?: string }; taskInfo?: { path?: string } } | undefined;
     const where = result?.file?.path ?? result?.taskInfo?.path;
+    // TaskNotes wrote the note, not the vault port: recorded here so undo covers it too (#164)
+    if (where) {
+      noteWrite();
+      recordChange({ op: "create", path: where, before: null, after: await vault.read(where).catch(() => null) });
+    }
     return `Created TaskNotes task '${title}'${where ? ` at '${where}'` : ""}`;
   });
 

@@ -18,7 +18,9 @@ import type { PluginBackend } from "../config/backend";
 import { unusableTools } from "../config/agents";
 import { messageOf } from "../core/errors";
 import { ALL_MCP_TOOLS, displayName, isMcpToolName } from "../mcp/servers";
+import type { PromptAsSent, PromptDraft } from "../inprocess/InProcessAgent";
 import { AskModal } from "../view/AskModal";
+import { PromptPreviewModal } from "../view/PromptPreviewModal";
 import { group } from "./layout";
 
 export interface AgentsHost {
@@ -35,6 +37,8 @@ export interface AgentsHost {
   setDefault(name: string): Promise<boolean>;
   /** Draw the whole settings tab again. */
   redraw(): void;
+  /** The agent's system prompt as its next turn would send it, with the editor's unsaved changes (#67). */
+  preview(name: string, draft: PromptDraft): Promise<PromptAsSent>;
 }
 
 /**
@@ -257,6 +261,14 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
     cls: "setting-item-description obsidian-agent-prompt-hint",
     text: `Filled in for each message: ${agent.variables.map((variable) => `{{ ${variable} }}`).join(", ")}.`,
   });
+  // What the model is really given, unsaved edits included: placeholders filled in, and the notes added after (#67)
+  new Setting(about).setName("As sent").setDesc("The prompt with its placeholders filled in and everything the agent "
+                                                + "adds to it, as the next message would send it. Nothing is run.")
+    .addButton((button) => button.setButtonText("Show as sent").onClick(() => {
+      const preview = host.preview(name, { prompt: draft.prompt, tools: draft.tools, vault_scope: draft.vault_scope,
+                                           llm_profile: draft.llm_profile, model: draft.model });
+      new PromptPreviewModal(host.app, name, preview).open();
+    }));
 
   // --- Where it may work, and with what ----------------------------------------------------------------------
   const folders = group(pane, "Folders", "Empty: the whole vault. Set: the agent's note tools refuse every note "

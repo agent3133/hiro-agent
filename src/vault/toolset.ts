@@ -5,6 +5,7 @@ import type { App } from "obsidian";
 import { protectVaultPaths } from "../core/paths";
 import { inSpecOrder, makeTools, type MemorySettings, type Tool } from "../core/tools";
 import { makeAttachmentTools } from "./attachmentTools";
+import { makeBasesTools } from "./basesTools";
 import { makeIndexTools } from "./indexTools";
 import { obsidianVault } from "./obsidianVault";
 import { makePluginTools } from "./pluginTools";
@@ -19,14 +20,16 @@ export interface ToolsetOptions {
   contextWindow: number;
   /** The undo journal (`journal`): on, how many turns, how many bytes of earlier text. */
   journal: { enabled: boolean; turns: number; maxBytes: number };
+  /** Write each answer's tool calls into its kept conversation's note (`vault.save_tool_calls`, #282). */
+  saveToolCalls: boolean;
 }
 
 export function obsidianToolset(app: App, scope: string[] | null, options: ToolsetOptions): Tool[] {
   // This vault's config folder, however it is named, and the user profile are out of the tools' reach (#135)
   protectVaultPaths({ configDir: app.vault.configDir, profilePath: options.memory?.profilePath });
   const vault = obsidianVault(app);
-  return inSpecOrder([...makeTools(vault, scope, { memory: options.memory }), ...makeIndexTools(app, vault, scope),
-                      ...makePluginTools(app, vault, scope), ...makeAttachmentTools(app, scope, options.audio),
+  return inSpecOrder([...makeTools(vault, scope, { memory: options.memory, configDir: app.vault.configDir }), ...makeIndexTools(app, vault, scope),
+                      ...makePluginTools(app, vault, scope), ...makeBasesTools(app, scope), ...makeAttachmentTools(app, scope, options.audio),
                       ...makeWebTools(options.web)]);
 }
 
@@ -44,6 +47,7 @@ export function toolsetOptions(config: { values: Record<string, unknown> } | nul
       turns: number((config?.values.journal as Record<string, unknown> | undefined)?.turns, 20),
       maxBytes: number((config?.values.journal as Record<string, unknown> | undefined)?.max_mb, 20) * 1_000_000,
     },
+    saveToolCalls: (config?.values.vault as Record<string, unknown> | undefined)?.save_tool_calls === true,
     web: {
       fetch: { enabled: fetch.enabled === true, timeoutSeconds: number(fetch.timeout, DEFAULT_WEB.fetch.timeoutSeconds),
                maxContentLength: number(fetch.max_content_length, DEFAULT_WEB.fetch.maxContentLength) },

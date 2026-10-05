@@ -15,6 +15,11 @@
 .obsidian-agent-keep input { margin: 0; }
 
 .obsidian-agent-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: var(--size-4-3); }
+/* Obsidian turns text selection off across its interface; what was said in the chat can be selected and copied (#217) */
+.obsidian-agent-messages { user-select: text; -webkit-user-select: text; cursor: auto; }
+.obsidian-agent-messages button, .obsidian-agent-messages .clickable-icon, .obsidian-agent-messages summary {
+  user-select: none; -webkit-user-select: none;
+}
 
 .obsidian-agent-message { border-radius: var(--radius-m); padding: var(--size-4-2) var(--size-4-3); }
 .obsidian-agent-message.mod-user { background: var(--background-modifier-hover); }
@@ -41,8 +46,12 @@
 .obsidian-agent-tool summary { display: flex; gap: var(--size-4-2); align-items: baseline; cursor: pointer;
   font-size: var(--font-ui-smaller); color: var(--text-muted); }
 .obsidian-agent-tool-name { font-family: var(--font-monospace); color: var(--text-normal); }
-.obsidian-agent-tool-arg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obsidian-agent-tool-arg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Always at the right edge, whether or not the call has arguments to show next to its name */
+.obsidian-agent-tool-state { margin-left: auto; flex-shrink: 0; }
 .obsidian-agent-tool.mod-error .obsidian-agent-tool-state { color: var(--text-error); }
+.obsidian-agent-tool-args { white-space: pre-wrap; font-size: var(--font-ui-smaller); color: var(--text-muted);
+  max-height: 10em; overflow-y: auto; margin-bottom: 0; }
 .obsidian-agent-tool-result { white-space: pre-wrap; font-size: var(--font-ui-smaller); max-height: 16em;
   overflow-y: auto; }
 
@@ -70,14 +79,87 @@
   font-size: var(--font-ui-small);
 }
 
+/* Wide, and resizable from its corner: the diff takes the room the dialog is given (#131) */
+.modal.obsidian-agent-undo-modal {
+  width: min(92vw, 900px);
+  max-width: 92vw;
+  min-width: 360px;
+  min-height: 260px;
+  max-height: 92vh;
+  resize: both;
+  overflow: hidden;
+}
+
+.obsidian-agent-undo-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .obsidian-agent-undo-diff {
-  max-height: 16em;
+  flex: 1 1 auto;
+  min-height: 8em;
   overflow: auto;
-  padding: 0.6em;
+  padding: 0.4em 0;
   border-radius: var(--radius-s);
   background: var(--background-secondary);
+  font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);
-  white-space: pre;
+}
+
+.obsidian-agent-diff-file + .obsidian-agent-diff-file {
+  margin-top: 0.6em;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.obsidian-agent-diff-name {
+  display: flex;
+  gap: 0.5em;
+  padding: 0.3em 0.6em;
+  font-family: var(--font-interface);
+  font-weight: var(--font-semibold);
+}
+
+.obsidian-agent-diff-change {
+  color: var(--text-muted);
+  font-weight: var(--font-normal);
+}
+
+.obsidian-agent-diff-line {
+  display: flex;
+  padding: 0 0.6em;
+}
+
+/* Long lines wrap rather than run off to the right */
+.obsidian-agent-diff-text {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.obsidian-agent-diff-sign {
+  flex: 0 0 1.2em;
+  user-select: none;
+}
+
+.obsidian-agent-diff-line.is-add {
+  color: var(--color-green);
+  background: rgba(var(--color-green-rgb), 0.1);
+}
+
+.obsidian-agent-diff-line.is-remove {
+  color: var(--color-red);
+  background: rgba(var(--color-red-rgb), 0.1);
+}
+
+.obsidian-agent-diff-line.is-context,
+.obsidian-agent-diff-line.is-note {
+  color: var(--text-muted);
+}
+
+.obsidian-agent-diff-line.is-hunk {
+  color: var(--text-faint);
 }
 
 .obsidian-agent-undo-note {
@@ -143,8 +225,9 @@
   display: block;
 }
 
+/* Indented like the card's rows (20px each side), not flush with its edge */
 .obsidian-agent-card-intro {
-  padding: var(--size-4-3) 0 var(--size-4-1);
+  padding: var(--size-4-3) var(--size-4-5) var(--size-4-1);
 }
 
 /* A connection's sampling and limits, folded under its row (#149) */
@@ -393,3 +476,37 @@
   outline-offset: -4px;
 }
 
+
+/* The Agents tab's "Show as sent" (#67): the whole prompt, wrapped, in a wide dialog */
+.modal.obsidian-agent-prompt-preview {
+  width: min(92vw, 900px);
+  max-width: 92vw;
+}
+
+.obsidian-agent-prompt-preview-text {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 0.6em;
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* The note's selection while the cursor is in the chat (#218), and the line saying what a message takes along */
+.obsidian-agent-kept-selection { background-color: var(--text-selection); }
+.obsidian-agent-context-line {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 0 var(--size-4-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Renaming a conversation (#286): the name across the dialog, what is wrong with it below */
+.obsidian-agent-rename-input { width: 100%; }
+.obsidian-agent-rename-problem { min-height: 1.5em; margin-top: var(--size-4-1); color: var(--text-error);
+  font-size: var(--font-ui-smaller); }

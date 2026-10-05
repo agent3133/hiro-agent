@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ConfigFieldError } from "../api/types";
 import { makeVault, type TestVault } from "../core/testing/vault";
-import { AgentCatalog } from "./agents";
+import { AgentCatalog, RETIRED_TOOLS } from "./agents";
 import bundled from "./bundled-agents.json";
 import specs from "../core/tools/specs.json";
 
@@ -268,5 +268,26 @@ describe("an agent listing MCP tools before this device listed the server (#178)
     const result = await catalog.saveAgent("assistant", { fields: { tools: ["other__web"] } });
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).toContain("there is no tool called 'other__web'");
+  });
+});
+
+describe("tools the plugin no longer has", () => {
+  // A copy of the assistant from an older version listed git, tasknotes_cli, web_search and list_bases, and the
+  // Agents tab asked the user to remove them, as if they were the user's mistake (2026-10-05)
+  const copy = "---\nname: assistant\ndescription: d\ntools:\n  - read_note\n  - git\n  - tasknotes_cli\n"
+    + "  - web_search\n  - list_bases\n  - obsidian_cli\n  - made_up_tool\n---\nPrompt.\n";
+
+  it("are dropped when an agent is read, while a name the plugin never had stays to be shown", async () => {
+    const { catalog } = await catalogWith({ ".agents/assistant.md": copy });
+    expect((await catalog.agent("assistant")).tools).toEqual(["read_note", "made_up_tool"]);
+  });
+
+  it("are left out of the file at the next save", async () => {
+    const { vault, catalog } = await catalogWith({ ".agents/assistant.md": copy });
+    const tools = (await catalog.agent("assistant")).tools.filter((tool) => tool !== "made_up_tool");
+    const result = await catalog.saveAgent("assistant", { fields: { tools } });
+    expect(result.ok).toBe(true);
+    const text = await vault.read(".agents/assistant.md");
+    for (const retired of RETIRED_TOOLS) expect(text).not.toContain(retired);
   });
 });

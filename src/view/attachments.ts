@@ -4,20 +4,28 @@
  * attachment location when the message is sent, and the agent reads them with read_attachment.
  */
 
+import { DOCUMENT_EXTENSIONS } from "../core/documents";
+import { TEXT_EXTENSIONS } from "../core/documents/textFile";
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS } from "../core/recordings";
 
-export type AttachmentKind = "image" | "pdf" | "audio" | "video";
+export type AttachmentKind = "image" | "pdf" | "audio" | "video" | "document";
+
+/** Office documents and text files, which read_attachment reads as text (#210, #211); not the old binary formats. */
+export const READABLE_DOCUMENTS = [...DOCUMENT_EXTENSIONS.filter((ext) => !["doc", "xls", "ppt"].includes(ext)),
+                                   ...TEXT_EXTENSIONS];
 
 /** What read_attachment reads as an image. */
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"];
 
 /** The largest file of each kind, in MB: a video is sampled and transcribed, so a longer one adds time, not much else. */
-export const LIMITS_MB: Record<AttachmentKind, number> = { image: 20, pdf: 50, audio: 100, video: 100 };
+export const LIMITS_MB: Record<AttachmentKind, number> = { image: 20, pdf: 50, audio: 100, video: 100, document: 50 };
 
-const KIND_NAMES: Record<AttachmentKind, string> = { image: "an image", pdf: "a PDF", audio: "a recording", video: "a video" };
+const KIND_NAMES: Record<AttachmentKind, string> = { image: "an image", pdf: "a PDF", audio: "a recording", video: "a video",
+                                                     document: "a document" };
 
 /** For the file picker: every extension the agent can read. */
-export const ACCEPT = [...IMAGE_EXTENSIONS, "pdf", ...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS].map((ext) => `.${ext}`).join(",");
+export const ACCEPT = [...IMAGE_EXTENSIONS, "pdf", ...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS, ...READABLE_DOCUMENTS]
+  .map((ext) => `.${ext}`).join(",");
 
 function extensionOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -31,6 +39,7 @@ export function kindOf(name: string): AttachmentKind | null {
   if (extension === "pdf") return "pdf";
   if (VIDEO_EXTENSIONS.includes(extension)) return "video";
   if (AUDIO_EXTENSIONS.includes(extension)) return "audio";
+  if (READABLE_DOCUMENTS.includes(extension)) return "document";
   return null;
 }
 
@@ -45,7 +54,7 @@ export function formatSize(bytes: number): string {
 export function checkAttachment(name: string, size: number): { kind: AttachmentKind } | { error: string } {
   const kind = kindOf(name);
   if (!kind) {
-    return { error: `${name} can't be added: the agent reads images, PDFs, recordings and videos.` };
+    return { error: `${name} can't be added: the agent reads images, PDFs, recordings, videos, Office documents and text files.` };
   }
   const limit = LIMITS_MB[kind];
   if (size > limit * 1024 * 1024) {

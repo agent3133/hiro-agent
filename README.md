@@ -85,7 +85,7 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
 ## What it can do
 
 - **Chat sidebar** — an agent that reads, searches, writes, moves and deletes notes; each tool call is shown as it
-  happens, with its result.
+  happens, with its arguments and its result.
 - **Any model you choose** — a local server (llama.cpp, Ollama, LM Studio, vLLM) or any OpenAI-compatible API, several connections side by
   side, switchable per conversation.
 - **Agents** — three built in (a general assistant, a daily note, a weekly review), plus your own, written as
@@ -93,10 +93,15 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
   like any other note.
 - **Folder restrictions enforced by the tools**, not just requested in a prompt: a restricted agent's tools refuse
   everything outside its folders, and the agent is told so.
-- **Conversations kept as notes**, and an undo button for anything a turn changed — it shows the diff first.
-- **Attachments** — images, PDFs page by page, voice recordings and videos, transcribed on your computer with
-  whisper.cpp and ffmpeg. Drop files onto the chat, or press **+**, to give the agent something that is not in the
-  vault yet.
+- **Conversations kept as notes** — several chats at once, each conversation renamed as you like and listed newest
+  first, optionally with the tool calls of each answer so you can check later what the agent did — and an undo
+  button for anything an answer changed, which shows the diff first.
+- **Attachments** — images, PDFs (as text, or page by page when scanned), Word, Excel, PowerPoint and OpenDocument
+  files, EPUB books, canvases and text files as text, voice recordings and videos, transcribed on your computer with
+  whisper.cpp and ffmpeg. The agent lists, moves and deletes the files in your vault that are not notes. Drop files
+  onto the chat, or press **+**, to give the agent something that is not in the vault yet.
+- **Bases** — the agent runs a Base and reads its rows as Obsidian computes them: a `.base` file, a Base embedded in
+  a note, or one it writes for the question. Needs the Bases core plugin.
 - **Web pages** — the agent can open a page. Off until you switch it on, and marked as sending data off your
   machine. Web search comes from an MCP server of your choice.
 - **MCP servers** — tools from other programs on your computer or from HTTP services, if you want to extend what
@@ -108,11 +113,11 @@ The tools, grouped as the Agents tab shows them — each agent gets only the one
 
 | Group | Tools |
 |---|---|
-| Read notes | `read_note`, `read_notes`, `list_notes`, `find_notes`, `search_vault`, `list_tags`, `note_outline`, `get_backlinks`, `get_outlinks`, `get_metadata`, `find_broken_links`, `read_attachment` |
+| Read notes | `read_note`, `read_notes`, `list_notes`, `find_notes`, `search_vault`, `list_tags`, `note_outline`, `get_backlinks`, `get_outlinks`, `get_metadata`, `find_broken_links`, `list_attachments`, `read_attachment` |
 | Write notes | `create_note`, `edit_note`, `append_to_note`, `update_note`, `update_metadata`, `create_from_template` |
 | Delete and move | `delete_note`, `move_note` |
 | Tasks | `list_tasks`, `list_tasknotes`, `create_tasknote`, `complete_tasknote` |
-| Obsidian | `daily_note`, `list_templates`, `open_in_obsidian` |
+| Obsidian | `daily_note`, `list_templates`, `open_in_obsidian`, `query_base` |
 | Web | `web_fetch` |
 | Memory (when on) | `read_user_memory`, `update_user_memory` |
 
@@ -165,6 +170,12 @@ Kept current during the beta; a limitation listed here does not need reporting a
 
 - The plugin is tested by hand on Windows only. On macOS and Linux the build and the tests pass, but nobody has
   clicked through it yet — reports from those systems are especially welcome.
+- Bases run only while the Obsidian window is not minimized: Obsidian does not compute a Base in a minimized
+  window, and the agent says so instead of answering.
+- A conversation note written by this version can hold a `title:` and, with *Save tool calls with conversations*
+  on, the answers' tool calls. An older version of the plugin shows those calls as text in the answer.
+- OpenAI's Responses API, which a connection to OpenAI now uses, has been tried with gpt-6.1-sol only. If another
+  OpenAI model misbehaves, set *API* to *chat completions* under the connection's *More for …* and report it.
 
 ## Feedback and issues
 

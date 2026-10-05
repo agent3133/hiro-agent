@@ -7,6 +7,8 @@
  * can count what a full port would need.
  */
 
+import { weekday } from "./dates";
+
 export interface RenderedPrompt {
   text: string;
   /** Expressions the substitution could not evaluate, as written. */
@@ -18,6 +20,8 @@ export function promptContext(vaultPath: string, agentName: string, model: strin
   return {
     vault_path: vaultPath,
     current_date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    // Its own variable, not part of current_date: current_date[:7] is the month (#261)
+    current_weekday: weekday(now),
     current_time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
     agent_name: agentName,
     model,

@@ -270,6 +270,62 @@
           "description": "A named set of sampling values for the model: thinking-general, thinking-coding, instruct-general or instruct-reasoning. A value set above wins over the preset's.",
           "title": "Sampling Preset"
         },
+        "service_tier": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "flex",
+                "priority",
+                "auto"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OpenAI's processing tier for this connection: flex costs about half and answers more slowly, and OpenAI refuses a request (429) when it has no flex capacity; priority answers faster at a higher price; auto as OpenAI defines it. Left empty, nothing is sent and the account's default applies. Other servers ignore it, or may refuse it.",
+          "title": "Service Tier"
+        },
+        "service_tier_fallback": {
+          "default": true,
+          "description": "When OpenAI refuses a flex request because it has no capacity (HTTP 429), send it once more with the service tier auto, at the normal price. Off, the answer fails instead and nothing is charged at the higher price.",
+          "title": "Service Tier Fallback",
+          "type": "boolean"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How much a reasoning model thinks before answering (OpenAI's reasoning_effort): less is faster and cheaper, more is better on hard questions. Models accept different values \u2014 one a model does not take is refused, and the error names it. Left empty, nothing is sent and the model's default applies. For a llama.cpp model, use Enable thinking instead. With a reasoning effort set, no temperature is sent unless one is set here, as reasoning models refuse one.",
+          "title": "Reasoning Effort"
+        },
+        "api": {
+          "default": "auto",
+          "description": "How the plugin talks to the model: OpenAI's Responses API, which OpenAI's current reasoning models need for tools, or chat completions, which local servers and most other providers speak. Auto uses the Responses API for api.openai.com and chat completions for every other address.",
+          "enum": [
+            "auto",
+            "responses",
+            "chat_completions"
+          ],
+          "title": "API",
+          "type": "string"
+        },
         "max_tokens": {
           "anyOf": [
             {
@@ -415,6 +471,12 @@
           "description": "The agent used when none is chosen. (`default`, the built-in agent's old name, still works.)",
           "title": "Default Agent",
           "type": "string"
+        },
+        "save_tool_calls": {
+          "default": false,
+          "description": "Save the agent's tool calls with each kept conversation, to check later what it did. Notes get longer.",
+          "title": "Save Tool Calls",
+          "type": "boolean"
         }
       },
       "required": [

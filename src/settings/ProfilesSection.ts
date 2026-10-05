@@ -120,7 +120,7 @@ export function renderProfiles(container: HTMLElement, doc: ConfigDocument, host
     const section = buildSection(doc.schema, entry, values, ["llm_profiles", name]);
     const key = (field: ConfigField): string => field.path[field.path.length - 1];
     const more = container.createEl("details", { cls: "obsidian-agent-config-section obsidian-agent-connection-more" });
-    more.createEl("summary", { text: `More for ${name}: sampling, context window, output length` });
+    more.createEl("summary", { text: `More for ${name}: sampling, context window, output length, reasoning, service tier` });
     const moreBody = more.createDiv();
     for (const field of section.fields.filter((item) => !CONNECTION_BASICS.includes(key(item)))) {
       renderField(moreBody, field, host);

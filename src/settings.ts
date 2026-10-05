@@ -164,6 +164,7 @@ export class AgentSettingTab extends PluginSettingTab {
         await this.plugin.agentsChanged();  // the agent list carries which one is the default
         return true;
       },
+      preview: (name, draft) => this.plugin.promptAsSent(name, draft),
       redraw: () => this.display(),
     });
   }

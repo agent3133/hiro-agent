@@ -41,6 +41,8 @@ export interface AskParams {
   agent?: string;
   connection?: string;
   note?: string;
+  /** Text selected in that note, sent the way the chat sends a selection. */
+  selection?: string;
   session?: string;
   timeout?: string;
   allow?: string;
@@ -79,11 +81,27 @@ export interface AskResult {
   /** Whether the conversation was saved in .sessions/. */
   kept: boolean;
   calls: AskCall[];
+  /**
+   * How the context window fared (#228): its size, the most a request of the answer filled of it, how many earlier
+   * tool results were set aside to stay inside it (#154), and how many exchanges were summarised. The benchmark
+   * records these: for a change to context handling they say more than a pass rate.
+   */
+  context: AskContext;
+}
+
+export interface AskContext {
+  window: number;
+  peak_tokens: number;
+  set_aside: number;
+  summarised: number;
+  /** How many model calls each service tier served, as OpenAI said (#295): flex, or default after a fallback. */
+  service_tiers: Record<string, number>;
 }
 
 function failure(error: string): AskResult {
   return { ok: false, reply: "", error, agent: "", connection: "", session: "", tool_calls: 0, seconds: 0, changed: [],
-           refused: [], unasked: [], stopped: false, kept: false, calls: [] };
+           refused: [], unasked: [], stopped: false, kept: false, calls: [],
+           context: { window: 0, peak_tokens: 0, set_aside: 0, summarised: 0, service_tiers: {} } };
 }
 
 /** Runs the turn; never throws — a problem is `ok: false` with the error in words. */
@@ -103,6 +121,7 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
   }
   const note = (params.note ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (note && !(await host.noteExists(note))) return failure(`there is no note '${params.note}'`);
+  const selection = params.selection ?? "";
   const timeout = params.timeout === undefined ? DEFAULT_TIMEOUT_SECONDS : Number(params.timeout);
   if (!Number.isFinite(timeout) || timeout <= 0) return failure(`timeout= must be a number of seconds, not '${params.timeout}'`);
   if (params.allow && params.allow !== "destructive") {
@@ -130,16 +149,24 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: Omit<AskResult, "agent" | "connection" | "session" | "refused" | "unasked" | "stopped"
-                                  | "seconds" | "kept" | "calls">):
+                                  | "seconds" | "kept" | "calls" | "context">):
         void => {
       if (timer !== undefined) clearTimeout(timer);
       const seconds = Math.round((Date.now() - started) / 100) / 10;
       host.notice(`Hiro Agent: the request from the terminal ${stopped ? `was stopped after ${timeout} s` : result.ok ? "is done"
                    : "failed"}${kept ? ` — saved as "${session}"` : ""}.`);
-      resolve({ ...result, agent, connection, session, refused, unasked, stopped, seconds, kept, calls });
+      resolve({ ...result, agent, connection, session, refused, unasked, stopped, seconds, kept, calls, context });
     };
+    const context: AskContext = { window: 0, peak_tokens: 0, set_aside: 0, summarised: 0, service_tiers: {} };
     const handlers: TurnHandlers = {
       onToken: (text) => { reply += text; },
+      onContext: (tokens, window, _estimated, peak) => {
+        context.window = window;
+        context.peak_tokens = Math.max(context.peak_tokens, peak ?? tokens, tokens);
+      },
+      onSetAside: (total) => { context.set_aside = Math.max(context.set_aside, total); },
+      onSummary: (exchanges) => { context.summarised += exchanges; },
+      onServiceTier: (tier) => { context.service_tiers[tier] = (context.service_tiers[tier] ?? 0) + 1; },
       onThinking: () => undefined,
       onToolCall: (call) => {
         const made: AskCall = { name: call.name, args: call.input ?? {}, result: "", error: false };
@@ -174,7 +201,8 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
       onError: (message) => finish({ ok: false, reply, error: message, tool_calls: 0, changed: [] }),
     };
     const turn = host.send(prompt, { agent, session, profile: connection || undefined, keep: kept,
-                                     context: note ? { active_note: note } : undefined }, handlers);
+                                     context: note || selection ? { ...(note ? { active_note: note } : {}), ...(selection ? { selection } : {}) }
+                                       : undefined }, handlers);
     timer = setTimeout(() => {
       stopped = true;
       host.cancel(turn);

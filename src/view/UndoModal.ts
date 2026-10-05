@@ -14,6 +14,7 @@ import { App, Modal, Notice, Setting } from "obsidian";
 import type { TurnChanges } from "../api/types";
 import { messageOf } from "../core/errors";
 import type { InProcessAgent } from "../inprocess/InProcessAgent";
+import { parseDiff } from "./diffParts";
 
 export class UndoModal extends Modal {
   private busy = false;
@@ -28,6 +29,8 @@ export class UndoModal extends Modal {
   override onOpen(): void {
     const { contentEl } = this;
     contentEl.addClass("obsidian-agent-undo");
+    // Wide enough for a note's lines, and resizable: the diff grows with the dialog (#131)
+    this.modalEl.addClass("obsidian-agent-undo-modal");
     this.setTitle("Undo what this answer changed?");
 
     const list = contentEl.createEl("ul", { cls: "obsidian-agent-undo-files" });
@@ -35,7 +38,7 @@ export class UndoModal extends Modal {
 
     const warning = contentEl.createEl("p", { cls: "obsidian-agent-undo-warning" });
     warning.hide();
-    const diff = contentEl.createEl("pre", { cls: "obsidian-agent-undo-diff", text: "Loading the diff…" });
+    const diff = contentEl.createDiv({ cls: "obsidian-agent-undo-diff", text: "Loading the diff…" });
     void this.load(diff, warning);
 
     contentEl.createEl("p", {
@@ -63,7 +66,7 @@ export class UndoModal extends Modal {
       diff.setText(`The diff could not be read: ${messageOf(error)}`);
       return;
     }
-    diff.setText(answer.diff || "(nothing textual changed)");
+    renderDiff(diff, answer.diff);
     if (!answer.stale?.length) return;
 
     const all = answer.stale.length >= this.changed.files.length;
@@ -106,4 +109,29 @@ export function describeUndo(result: { restored: string[]; refused: { path: stri
     .map((item) => (item.path ? `${item.path} — ${item.reason}` : item.reason))
     .join("; ");
   return `${restored} Left alone: ${kept}`;
+}
+
+/**
+ * *diff* into *el*: one section per file, named with what happened to it, its lines coloured by kind — added green,
+ * removed red, context muted — in the theme's colours, the hunk headers as quiet separators (#131).
+ */
+function renderDiff(el: HTMLElement, diff: string): void {
+  el.empty();
+  const files = parseDiff(diff);
+  if (!files.length) {
+    el.setText(diff.trim() || "(nothing textual changed)");
+    return;
+  }
+  for (const file of files) {
+    const section = el.createDiv({ cls: "obsidian-agent-diff-file" });
+    const head = section.createDiv({ cls: "obsidian-agent-diff-name" });
+    head.createSpan({ cls: `obsidian-agent-diff-change is-${file.change}`, text: file.change });
+    head.createSpan({ text: file.title });
+    for (const line of file.lines) {
+      const row = section.createDiv({ cls: `obsidian-agent-diff-line is-${line.kind}` });
+      row.createSpan({ cls: "obsidian-agent-diff-sign",
+                       text: line.kind === "add" ? "+" : line.kind === "remove" ? "−" : "" });
+      row.createSpan({ cls: "obsidian-agent-diff-text", text: line.kind === "hunk" ? "⋯" : line.text || " " });
+    }
+  }
 }

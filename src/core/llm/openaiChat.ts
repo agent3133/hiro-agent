@@ -25,7 +25,9 @@ export type ContentPart = { type: "text"; text: string } | { type: "image_url"; 
 
 export type ChatMessage =
   | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string; tool_calls?: ToolCallRequest[] }
+  | { role: "assistant"; content: string; tool_calls?: ToolCallRequest[];
+      /** The Responses API's reasoning items for these calls, passed back with their results (#295); opaque. */
+      reasoning_items?: unknown[] }
   | { role: "tool"; content: string | ContentPart[]; tool_call_id: string };
 
 /** What a tool result says in words — images shown as a marker — for the chat view and the failure streak. */
@@ -86,6 +88,14 @@ export function httpError(status: number, host: string, body: string): Error {
   return serverError(error, `${host} answered HTTP ${status}${said ? `: ${said}` : ""}`);
 }
 
+/** A flex request refused (HTTP 429), as a person reads it: what happened and the two ways on. */
+export function flexRefused(host: string, body: string): Error {
+  const said = httpError(429, host, body).message;
+  return new Error(`${host} refused the request at the flex service tier (HTTP 429): it has no flex capacity right `
+    + "now, or a rate limit was reached. Send the message again later, or turn on Service tier fallback in the "
+    + `connection's settings (Settings → Hiro Agent → Connections), which uses tier auto at the normal price. (${said})`);
+}
+
 /**
  * How long a server may stay silent (#179): before its first byte — llama.cpp sends nothing while it reads a long
  * prompt, which can take minutes on a small machine — and between two chunks once it has started.
@@ -107,7 +117,18 @@ export interface LlmSettings {
   topK?: number;
   minP?: number;
   repetitionPenalty?: number;
+  /** OpenAI's `service_tier` — flex at about half the price, priority faster; not sent when unset. */
+  serviceTier?: string;
+  /** Send a flex request OpenAI refuses for capacity (HTTP 429) once more with tier auto. */
+  serviceTierFallback?: boolean;
+  /** OpenAI's `reasoning_effort` for a reasoning model; not sent when unset. */
+  reasoningEffort?: string;
+  /** A line for the plugin's log: a flex request sent again at tier auto is said there (#295). */
+  log?: (line: string) => void;
 }
+
+/** How long a flex request may wait for its first byte: OpenAI asks for up to 15 minutes. */
+export const FLEX_FIRST_BYTE_TIMEOUT_MS = 15 * 60_000;
 
 export interface ChatRequest {
   messages: ChatMessage[];
@@ -125,6 +146,10 @@ export interface Completion {
   finishReason: string | null;
   /** Tokens the request and the answer took, when the server said (#151). */
   usage?: { promptTokens: number; completionTokens: number };
+  /** The Responses API's reasoning items, which go back with the tool calls' results (#295). */
+  reasoningItems?: unknown[];
+  /** The service tier OpenAI says served the answer — flex, or default after a fallback — when it says (#295). */
+  serviceTier?: string;
 }
 
 export interface Deltas {
@@ -153,6 +178,7 @@ export function requestBody(settings: LlmSettings, request: ChatRequest, streamU
     ["presence_penalty", settings.presencePenalty],
     // llama.cpp / vLLM extensions, which Python sends through extra_body
     ["top_k", settings.topK], ["min_p", settings.minP], ["repetition_penalty", settings.repetitionPenalty],
+    ["service_tier", settings.serviceTier], ["reasoning_effort", settings.reasoningEffort],
   ];
   for (const [key, value] of optional) if (value !== undefined && value !== null) body[key] = value;
   if (request.maxTokens) body.max_tokens = request.maxTokens;
@@ -168,6 +194,8 @@ function wireMessage(message: ChatMessage): Record<string, unknown> {
                                                        function: { name: call.name, arguments: call.arguments } })),
     };
   }
+  // Reasoning items are the Responses API's: a chat completions server does not know them
+  if (message.role === "assistant") return { role: "assistant", content: message.content };
   return message;
 }
 
@@ -204,6 +232,7 @@ export class CompletionBuilder {
   private calls = new Map<number, ToolCallRequest>();
   private finishReason: string | null = null;
   private usage?: { promptTokens: number; completionTokens: number };
+  private serviceTier?: string;
   done = false;
 
   constructor(private readonly deltas: Deltas = {}) {}
@@ -215,8 +244,9 @@ export class CompletionBuilder {
       return;
     }
     const chunk = JSON.parse(payload) as { choices?: ChunkChoice[]; error?: ServerError; usage?: ChunkUsage | null;
-                                           timings?: ChunkTimings };
+                                           timings?: ChunkTimings; service_tier?: string | null };
     if (chunk.error) throw serverError(chunk.error, chunk.error.message ?? JSON.stringify(chunk.error));
+    if (typeof chunk.service_tier === "string") this.serviceTier = chunk.service_tier;
     this.takeUsage(chunk.usage, chunk.timings);
     for (const choice of chunk.choices ?? []) {
       const delta = choice.delta ?? {};
@@ -255,6 +285,7 @@ export class CompletionBuilder {
     const completion: Completion = { content: this.content, reasoning: this.reasoning, toolCalls,
                                      finishReason: this.finishReason };
     if (this.usage) completion.usage = this.usage;
+    if (this.serviceTier) completion.serviceTier = this.serviceTier;
     return completion;
   }
 }
@@ -288,80 +319,124 @@ export class OpenAiChat implements ChatModel {
   constructor(private readonly settings: LlmSettings) {}
 
   complete(request: ChatRequest, deltas: Deltas, signal?: AbortSignal): Promise<Completion> {
-    const url = new URL(`${this.settings.baseUrl.replace(/\/+$/, "")}/chat/completions`);
     const asked = this.streamUsage;
-    const body = JSON.stringify(requestBody(this.settings, request, asked));
-    const transport = url.protocol === "https:" ? https : http;
-    const headers: Record<string, string | number> = {
-      "Content-Type": "application/json", Accept: "text/event-stream",
-      "Content-Length": new TextEncoder().encode(body).byteLength,
-    };
-    if (this.settings.apiKey) headers.Authorization = `Bearer ${this.settings.apiKey}`;
+    const body = requestBody(this.settings, request, asked);
+    return postStream(this.settings, "chat/completions", body, new CompletionBuilder(deltas), signal, (status, text, host) => {
+      // A strict server that does not know stream_options: ask again without it, and from now on
+      if (asked && status === 400 && /stream_options/i.test(text)) {
+        this.streamUsage = false;
+        return this.complete(request, deltas, signal);
+      }
+      return flexFallback(this.settings, status, text, host,
+                          (fallback) => new OpenAiChat(fallback).complete(request, deltas, signal));
+    });
+  }
+}
 
-    const { firstByteMs, idleMs } = this.settings.timeouts ?? { firstByteMs: FIRST_BYTE_TIMEOUT_MS, idleMs: IDLE_TIMEOUT_MS };
-    return new Promise((resolve, reject) => {
-      // A server that stops sending ends the answer with a message, instead of leaving the chat waiting (#179)
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const quiet = (ms: number, what: string): void => {
-        clearTimeout(timer);
-        timer = setTimeout(() => req.destroy(new Error(
-          `${url.host} ${what} for ${Math.round(ms / 1000)} seconds, so the answer was stopped. Is the model server `
-          + "still running?")), ms);
-      };
-      const done = (): void => clearTimeout(timer);
-      // A connection of its own per request (agent: false). Node's default agent keeps connections alive, and a
-      // request sent right after the last response — a tool that answers at once — reused the socket llama-server
-      // was closing, and the turn died with ECONNRESET.
-      // The system's certificates too, as requestUrl trusts them: a reverse proxy with one's own CA (#113)
-      const ca = url.protocol === "https:" ? certificateAuthorities() : undefined;
-      const req = transport.request(url, { method: "POST", headers, signal, agent: false, ...(ca ? { ca } : {}) }, (res) => {
-        res.setEncoding("utf-8");
-        quiet(idleMs, "sent nothing more");
-        if ((res.statusCode ?? 0) >= 400) {
-          let text = "";
-          res.on("data", (part: string) => (text += part));
-          res.on("end", () => {
-            // A strict server that does not know stream_options: ask again without it, and from now on
-            if (asked && res.statusCode === 400 && /stream_options/i.test(text)) {
-              this.streamUsage = false;
-              resolve(this.complete(request, deltas, signal));
-              return;
-            }
-            reject(httpError(res.statusCode ?? 0, url.host, text));
-          });
-          return;
-        }
-        const decoder = new SseDecoder();
-        const builder = new CompletionBuilder(deltas);
-        const take = (payloads: string[]): boolean => {
-          try {
-            for (const payload of payloads) builder.add(payload);
-            return true;
-          } catch (error) {
-            req.destroy();
-            reject(error);
-            return false;
-          }
-        };
-        res.on("data", (part: string) => {
-          quiet(idleMs, "sent nothing more");
-          void take(decoder.push(part));
-        });
+/** What a wire format makes of a stream: its `data:` payloads in, a completion out. */
+export interface StreamParser {
+  add(payload: string): void;
+  result(): Completion;
+}
+
+/**
+ * A refused request (HTTP 400 and up), seen by the client that sent it: an answer got another way — the request
+ * asked again differently — or the error to fail with.
+ */
+export type Refusal = (status: number, text: string, host: string) => Promise<Completion> | Error;
+
+/**
+ * A flex request OpenAI refused for capacity (HTTP 429): once more at tier auto through *again* when the
+ * connection allows it, else said plainly. Any other refusal is the server's own error.
+ */
+export function flexFallback(settings: LlmSettings, status: number, text: string, host: string,
+                             again: (fallback: LlmSettings) => Promise<Completion>): Promise<Completion> | Error {
+  if (settings.serviceTier === "flex" && status === 429) {
+    if (settings.serviceTierFallback) {
+      settings.log?.(`${host} had no flex capacity for a request; sent again at service tier auto.`);
+      return again({ ...settings, serviceTier: "auto", serviceTierFallback: false });
+    }
+    return flexRefused(host, text);
+  }
+  return httpError(status, host, text);
+}
+
+/**
+ * POSTs *payload* to *path* under the connection's address and streams the answer through *parser*: the transport,
+ * the key and the timeouts both wire formats share.
+ */
+export function postStream(settings: LlmSettings, path: string, payload: Record<string, unknown>, parser: StreamParser,
+                           signal: AbortSignal | undefined, refused: Refusal): Promise<Completion> {
+  const url = new URL(`${settings.baseUrl.replace(/\/+$/, "")}/${path}`);
+  const body = JSON.stringify(payload);
+  const transport = url.protocol === "https:" ? https : http;
+  const headers: Record<string, string | number> = {
+    "Content-Type": "application/json", Accept: "text/event-stream",
+    "Content-Length": new TextEncoder().encode(body).byteLength,
+  };
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+
+  const flex = settings.serviceTier === "flex";
+  const { firstByteMs, idleMs } = settings.timeouts
+    ?? { firstByteMs: flex ? FLEX_FIRST_BYTE_TIMEOUT_MS : FIRST_BYTE_TIMEOUT_MS, idleMs: IDLE_TIMEOUT_MS };
+  return new Promise((resolve, reject) => {
+    // A server that stops sending ends the answer with a message, instead of leaving the chat waiting (#179)
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const quiet = (ms: number, what: string): void => {
+      clearTimeout(timer);
+      timer = setTimeout(() => req.destroy(new Error(
+        `${url.host} ${what} for ${Math.round(ms / 1000)} seconds, so the answer was stopped. Is the model server `
+        + "still running?")), ms);
+    };
+    const done = (): void => clearTimeout(timer);
+    // A connection of its own per request (agent: false). Node's default agent keeps connections alive, and a
+    // request sent right after the last response — a tool that answers at once — reused the socket llama-server
+    // was closing, and the turn died with ECONNRESET.
+    // The system's certificates too, as requestUrl trusts them: a reverse proxy with one's own CA (#113)
+    const ca = url.protocol === "https:" ? certificateAuthorities() : undefined;
+    const req = transport.request(url, { method: "POST", headers, signal, agent: false, ...(ca ? { ca } : {}) }, (res) => {
+      res.setEncoding("utf-8");
+      quiet(idleMs, "sent nothing more");
+      if ((res.statusCode ?? 0) >= 400) {
+        let text = "";
+        res.on("data", (part: string) => (text += part));
         res.on("end", () => {
           done();
-          if (take(decoder.flush())) resolve(builder.result());
+          const outcome = refused(res.statusCode ?? 0, text, url.host);
+          if (outcome instanceof Error) reject(outcome);
+          else resolve(outcome);
         });
-        res.on("error", (error) => {
-          done();
+        return;
+      }
+      const decoder = new SseDecoder();
+      const take = (payloads: string[]): boolean => {
+        try {
+          for (const payload of payloads) parser.add(payload);
+          return true;
+        } catch (error) {
+          req.destroy();
           reject(error);
-        });
+          return false;
+        }
+      };
+      res.on("data", (part: string) => {
+        quiet(idleMs, "sent nothing more");
+        void take(decoder.push(part));
       });
-      req.on("error", (error) => {
+      res.on("end", () => {
+        done();
+        if (take(decoder.flush())) resolve(parser.result());
+      });
+      res.on("error", (error) => {
         done();
         reject(error);
       });
-      quiet(firstByteMs, "did not start answering");
-      req.end(body);
     });
-  }
+    req.on("error", (error) => {
+      done();
+      reject(error);
+    });
+    quiet(firstByteMs, "did not start answering");
+    req.end(body);
+  });
 }

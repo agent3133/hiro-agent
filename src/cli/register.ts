@@ -37,6 +37,7 @@ export function registerCli(plugin: Plugin, host: CliHost): void {
     agent: { value: "<name>", description: "The agent; the default one when not given" },
     connection: { value: "<name>", description: "The connection; wins over the agent's own" },
     note: { value: "<path>", description: "A note the turn is about, as the commands pass the open note" },
+    selection: { value: "<text>", description: "Text selected in that note, as the chat passes a selection" },
     session: { value: "<name>", description: "Continue this saved conversation; a new one otherwise" },
     timeout: { value: "<seconds>", description: `Stop the turn after this long (default ${DEFAULT_TIMEOUT_SECONDS})` },
     allow: { value: "destructive", description: "Let it delete, move or overwrite notes (asked in Obsidian)" },

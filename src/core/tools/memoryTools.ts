@@ -66,8 +66,10 @@ export async function updateProfileSection(vault: VaultPort, profilePath: string
                                            maxProfileTokens?: number): Promise<string> {
   const current = (await readUserProfile(vault, profilePath))
     || SECTIONS.map(([name, hint]) => `## ${name}\n\n_${hint}_\n`).join("\n");
-  const pattern = new RegExp(`(## ${escapeRegExp(section)}\\s*\\n)([\\s\\S]*?)(?=\\n## |$(?![\\s\\S]))`);
-  const replacement = `## ${section}\n\n${content.trim()}\n`;
+  // "identity" is the Identity section, not a second one: matched without case, named as the profile names it (#164)
+  const name = SECTIONS.find(([known]) => known.toLowerCase() === section.trim().toLowerCase())?.[0] ?? section;
+  const pattern = new RegExp(`(## ${escapeRegExp(name)}\\s*\\n)([\\s\\S]*?)(?=\\n## |$(?![\\s\\S]))`, "i");
+  const replacement = `## ${name}\n\n${content.trim()}\n`;
   let updated = pattern.test(current)
     ? current.replace(pattern, () => replacement)
     : `${current.trimEnd()}\n\n${replacement}`;

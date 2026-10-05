@@ -1,13 +1,17 @@
 [
   {
     "name": "read_note",
-    "description": "Read and return the content of a note by its relative path in the vault.",
+    "description": "Read and return the content of a note by its relative path in the vault. To read only one section of a note, pass heading.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
+        },
+        "heading": {
+          "default": "",
+          "type": "string",
+          "description": "Only this section: the heading's text without the #s, e.g. 'Notes'; note_outline lists a note's headings."
         }
       },
       "required": [
@@ -25,7 +29,6 @@
           "items": {
             "type": "string"
           },
-          "title": "Paths",
           "type": "array"
         }
       },
@@ -36,21 +39,18 @@
   },
   {
     "name": "create_note",
-    "description": "Create a new note at the given path with the provided content.",
+    "description": "Create a new note at the given path with the provided content. A name cannot contain : < > \" | ? * (write 11.00 or 1100 for a time).",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "content": {
-          "title": "Content",
           "type": "string"
         },
         "overwrite": {
           "default": false,
-          "title": "Overwrite",
           "type": "boolean"
         }
       },
@@ -67,11 +67,9 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "content": {
-          "title": "Content",
           "type": "string"
         }
       },
@@ -83,25 +81,21 @@
   },
   {
     "name": "edit_note",
-    "description": "Replace an exact piece of text inside a note, leaving the rest untouched. old_text must appear\nexactly once unless replace_all is true.",
+    "description": "Replace an exact piece of text inside a note, leaving the rest untouched. old_text must appear exactly once unless replace_all is true; line endings and spaces at the ends of lines do not count.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "old_text": {
-          "title": "Old Text",
           "type": "string"
         },
         "new_text": {
-          "title": "New Text",
           "type": "string"
         },
         "replace_all": {
           "default": false,
-          "title": "Replace All",
           "type": "boolean"
         }
       },
@@ -119,12 +113,15 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "text": {
-          "title": "Text",
           "type": "string"
+        },
+        "heading": {
+          "default": "",
+          "type": "string",
+          "description": "Append at the end of this section instead"
         }
       },
       "required": [
@@ -135,17 +132,15 @@
   },
   {
     "name": "delete_note",
-    "description": "Delete a note (destructive). By default it moves to the vault's .trash folder and can be restored;\npermanent=true removes it for good.",
+    "description": "Delete a note or attachment (destructive). By default it moves to the vault's .trash folder and can be restored;\npermanent=true removes it for good.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "permanent": {
           "default": false,
-          "title": "Permanent",
           "type": "boolean"
         }
       },
@@ -156,24 +151,26 @@
   },
   {
     "name": "list_notes",
-    "description": "List markdown notes in the vault, optionally recursing into subdirectories. A long list is cut off\nafter *limit* notes and says how many it left out; name a folder to see fewer.",
+    "description": "List the notes in a folder, with its subfolders first (ending in '/'); with recursive, every note below it. A folder may be named by its last part when that is unique. A long list is cut off after *limit* entries and says how many it left out.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
           "default": "",
-          "title": "Path",
           "type": "string"
         },
         "recursive": {
           "default": false,
-          "title": "Recursive",
           "type": "boolean"
         },
         "limit": {
           "default": 100,
-          "title": "Limit",
           "type": "integer"
+        },
+        "sort": {
+          "default": "name",
+          "type": "string",
+          "description": "name, or modified: newest first, with dates"
         }
       },
       "required": []
@@ -181,23 +178,25 @@
   },
   {
     "name": "find_notes",
-    "description": "Find notes by file name or path. Supports * wildcards ('*2026-09*', 'Projects/*'); without a\nwildcard the pattern matches anywhere in the path, case-insensitively.",
+    "description": "Find notes by file name or path. Supports * wildcards ('*2026-09*', 'Projects/*', which finds that folder at any depth); without a wildcard the pattern matches anywhere in the path, case-insensitively.",
     "parameters": {
       "type": "object",
       "properties": {
         "pattern": {
-          "title": "Pattern",
           "type": "string"
         },
         "folder": {
           "default": "",
-          "title": "Folder",
           "type": "string"
         },
         "limit": {
           "default": 50,
-          "title": "Limit",
           "type": "integer"
+        },
+        "sort": {
+          "default": "name",
+          "type": "string",
+          "description": "name, or modified: newest first, with dates"
         }
       },
       "required": [
@@ -206,22 +205,46 @@
     }
   },
   {
+    "name": "list_attachments",
+    "description": "List the vault's attachments: the files that are not notes, such as images, PDFs, recordings, Word, Excel and PowerPoint files, canvases and CSV files, each with its type and size. path narrows the list to a folder and its subfolders; pattern filters by name with * wildcards, as in find_notes ('*invoice*', '*.pdf'). Read one with read_attachment.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "pattern": {
+          "default": "",
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "type": "integer"
+        },
+        "sort": {
+          "default": "name",
+          "type": "string",
+          "description": "name, or modified: newest first, with dates"
+        }
+      },
+      "required": []
+    }
+  },
+  {
     "name": "move_note",
-    "description": "Move or rename a note within the vault (destructive). By default every [[wikilink]] pointing at it\nis updated, so links do not break.",
+    "description": "Move or rename a note or attachment within the vault (destructive). By default every [[wikilink]] pointing at it\nis updated, so links do not break.",
     "parameters": {
       "type": "object",
       "properties": {
         "from_path": {
-          "title": "From Path",
           "type": "string"
         },
         "to_path": {
-          "title": "To Path",
           "type": "string"
         },
         "update_links": {
           "default": true,
-          "title": "Update Links",
           "type": "boolean"
         }
       },
@@ -239,22 +262,18 @@
       "properties": {
         "query": {
           "default": "",
-          "title": "Query",
           "type": "string"
         },
         "limit": {
           "default": 20,
-          "title": "Limit",
           "type": "integer"
         },
         "tag": {
           "default": "",
-          "title": "Tag",
           "type": "string"
         },
         "folder": {
           "default": "",
-          "title": "Folder",
           "type": "string"
         }
       },
@@ -269,7 +288,6 @@
       "properties": {
         "limit": {
           "default": 50,
-          "title": "Limit",
           "type": "integer"
         }
       },
@@ -283,7 +301,6 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
@@ -299,7 +316,6 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
@@ -316,12 +332,10 @@
       "properties": {
         "status": {
           "default": "todo",
-          "title": "Status",
           "type": "string"
         },
         "path": {
           "default": "",
-          "title": "Path",
           "type": "string"
         }
       },
@@ -336,7 +350,6 @@
       "properties": {
         "date": {
           "default": "",
-          "title": "Date",
           "type": "string"
         }
       },
@@ -350,7 +363,6 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
@@ -375,16 +387,13 @@
       "type": "object",
       "properties": {
         "template": {
-          "title": "Template",
           "type": "string"
         },
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "title": {
           "default": "",
-          "title": "Title",
           "type": "string"
         }
       },
@@ -410,13 +419,45 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
       "required": [
         "path"
       ]
+    }
+  },
+  {
+    "name": "query_base",
+    "description": "Run an Obsidian Base and return its rows, as its filters, formulas and sorting give them. Pass base (a .base file) or definition (a Base's YAML, such as the content of a ```base block, with note set to the note it is in). view picks one of the Base's views; limit caps the rows.\nExamples: {\"base\": \"Tasks - Open by project\", \"view\": \"Open tasks\"}, or for the tasks that link to a note: {\"definition\": \"filters: 'file.hasTag(\\\"task\\\") && file.hasLink(this.file)'\", \"note\": \"Projects/Plan.md\"}",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "default": "",
+          "type": "string"
+        },
+        "definition": {
+          "default": "",
+          "type": "string"
+        },
+        "view": {
+          "default": "",
+          "type": "string",
+          "description": "The view to run, by its name, e.g. 'Board'; without it, the Base's first view."
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer",
+          "description": "Rows to return, 50 by default. For more, e.g. all rows of a large Base, set it higher, e.g. 100; the answer says how many rows there are."
+        },
+        "note": {
+          "default": "",
+          "type": "string",
+          "description": "For a definition from a note: that note, which 'this' in it refers to"
+        }
+      },
+      "required": []
     }
   },
   {
@@ -427,12 +468,10 @@
       "properties": {
         "status": {
           "default": "open",
-          "title": "Status",
           "type": "string"
         },
         "project": {
           "default": "",
-          "title": "Project",
           "type": "string"
         }
       },
@@ -446,57 +485,46 @@
       "type": "object",
       "properties": {
         "title": {
-          "title": "Title",
           "type": "string"
         },
         "due": {
           "default": "",
-          "title": "Due",
           "type": "string"
         },
         "scheduled": {
           "default": "",
-          "title": "Scheduled",
           "type": "string"
         },
         "priority": {
           "default": "",
-          "title": "Priority",
           "type": "string"
         },
         "status": {
           "default": "",
-          "title": "Status",
           "type": "string"
         },
         "projects": {
           "default": "",
-          "title": "Projects",
           "type": "string"
         },
         "contexts": {
           "default": "",
-          "title": "Contexts",
           "type": "string"
         },
         "tags": {
           "default": "",
-          "title": "Tags",
           "type": "string"
         },
         "estimate": {
           "default": 0,
-          "title": "Estimate",
           "type": "integer"
         },
         "details": {
           "default": "",
-          "title": "Details",
           "type": "string"
         },
         "recurrence": {
           "default": "",
-          "title": "Recurrence",
           "type": "string"
         }
       },
@@ -512,7 +540,6 @@
       "type": "object",
       "properties": {
         "task": {
-          "title": "Task",
           "type": "string"
         }
       },
@@ -528,7 +555,6 @@
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         }
       },
@@ -539,20 +565,17 @@
   },
   {
     "name": "update_metadata",
-    "description": "Set or update a single frontmatter property of a note. The value **replaces** the old one, so to add\nto a list pass the whole list — read the note first and write '[\"task\", \"office\"]', not '[\"office\"]',\nor the tag that was there is gone. Types are read from the value: 'true' and 'false' become checkboxes,\nnumbers become numbers, a list becomes a list whether it is written as JSON or the way frontmatter writes\nit ('[task, office]'), and anything else, including a bare [[wikilink]], is text. Quote a value (\"true\")\nto store it as text. The result says what was stored.",
+    "description": "Set, update or remove a single frontmatter property of a note. The value **replaces** the old one, so to add\nto a list pass the whole list — read the note first and write '[\"task\", \"office\"]', not '[\"office\"]',\nor the tag that was there is gone. Types are read from the value: 'true' and 'false' become checkboxes,\nnumbers become numbers, a list becomes a list whether it is written as JSON or the way frontmatter writes\nit ('[task, office]'), and anything else, including a bare [[wikilink]], is text. Quote a value (\"true\")\nto store it as text. The result says what was stored. An unquoted null removes the property.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
         },
         "key": {
-          "title": "Key",
           "type": "string"
         },
         "value": {
-          "title": "Value",
           "type": "string"
         }
       },
@@ -565,13 +588,21 @@
   },
   {
     "name": "read_attachment",
-    "description": "Read an attachment file from the vault. PDF files are rendered page-by-page as images, image\nfiles (png, jpg, jpeg, gif, webp, bmp, tiff) are returned as images, video files (mp4, webm, avi,\nmov, mkv) are sampled as frames via ffmpeg plus a transcript of their audio track, and audio\nrecordings (m4a, mp3, wav, ogg, opus, flac, aac, audio-only webm) are transcribed to timestamped\ntext. Transcripts are saved below the recording's embed and reused on later calls. You may pass a bare filename (e.g. 'photo.jpg') and\nthe tool will locate the file anywhere in the vault automatically.",
+    "description": "Read an attachment file from the vault. PDF files are returned as their text when they have a text layer, and otherwise rendered page-by-page as images; as_text chooses. Image\nfiles (png, jpg, jpeg, gif, webp, bmp, tiff) are returned as images, video files (mp4, webm, avi,\nmov, mkv) are sampled as frames via ffmpeg plus a transcript of their audio track, and audio\nrecordings (m4a, mp3, wav, ogg, opus, flac, aac, audio-only webm) are transcribed to timestamped\ntext. Transcripts are saved below the recording's embed and reused on later calls. You may pass a bare filename (e.g. 'photo.jpg') and\nthe tool will locate the file anywhere in the vault automatically. Office documents (docx, xlsx, pptx), OpenDocument (odt, ods, odp), EPUB books, canvases and text files (csv, json, txt, …) are returned as text; pages picks the sheets, slides or chapters.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
-          "title": "Path",
           "type": "string"
+        },
+        "pages": {
+          "default": "",
+          "type": "string",
+          "description": "PDF pages, sheets, slides or chapters, e.g. '2' or '1-3'"
+        },
+        "as_text": {
+          "type": "boolean",
+          "description": "A PDF's text (true) or its pages as images (false). Left out, the text when the PDF has a text layer, which is far smaller and the way to read or search its words; images are for scans, charts and layout."
         }
       },
       "required": [
@@ -587,12 +618,10 @@
       "properties": {
         "section": {
           "description": "The profile section to update. One of: 'Identity', 'Preferences', 'Projects & Context', 'Communication Style', 'Learned Facts'.",
-          "title": "Section",
           "type": "string"
         },
         "content": {
           "description": "The new content for this section. Will replace the existing section content.",
-          "title": "Content",
           "type": "string"
         }
       },
@@ -618,12 +647,10 @@
       "type": "object",
       "properties": {
         "url": {
-          "title": "Url",
           "type": "string"
         },
         "format": {
           "default": "auto",
-          "title": "Format",
           "type": "string"
         }
       },

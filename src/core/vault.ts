@@ -8,7 +8,7 @@
  */
 
 import { getCloseMatches, ratio } from "./difflib";
-import { basename, hasSuffix, normalize, PathError, safeResolve, stem } from "./paths";
+import { basename, fold, hasSuffix, normalize, PathError, safeResolve, stem } from "./paths";
 
 export interface VaultPort {
   /** Every file, including files in dot folders (callers decide what to skip). Sorted. */
@@ -24,6 +24,42 @@ export interface VaultPort {
   remove(path: string): Promise<void>;
   /** Move a file, creating the folders it goes to; in Obsidian, links follow it as the user has them set. */
   move(from: string, to: string): Promise<void>;
+  /**
+   * Change an existing file's text by *change*, applied to the text as it is at the moment of writing, so an edit
+   * the user typed meanwhile is not lost (Obsidian's `Vault.process`, #164). The text written. A port without it
+   * reads and writes (modifyFile).
+   */
+  modify?(path: string, change: (text: string) => string): Promise<string>;
+  /** A file's text for searching, from Obsidian's cache where it has one (`Vault.cachedRead`, #164). */
+  cachedRead?(path: string): Promise<string>;
+  /** When a file was last changed, in milliseconds since 1970 (#166). */
+  modified?(path: string): Promise<number>;
+  /** A file's size in bytes, for the attachment listing (#235). */
+  size?(path: string): Promise<number>;
+}
+
+/**
+ * *paths* newest first, each with the day it was last changed — for "what did I work on this week" (#166). As they
+ * are, without days, where the port cannot tell.
+ */
+export async function newestFirst(vault: VaultPort, paths: string[]): Promise<string[]> {
+  if (!vault.modified) return paths;
+  const dated = await Promise.all(paths.map(async (path) => ({ path, time: await vault.modified!(path).catch(() => 0) })));
+  const day = (time: number): string => {
+    const date = new Date(time);
+    const pad = (n: number): string => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  };
+  return dated.sort((a, b) => b.time - a.time || (a.path < b.path ? -1 : 1))
+    .map(({ path, time }) => (time ? `${path} (${day(time)})` : path));
+}
+
+/** *path*'s text changed by *change*, atomically where the port can (VaultPort.modify); the text written. */
+export async function modifyFile(vault: VaultPort, path: string, change: (text: string) => string): Promise<string> {
+  if (vault.modify) return vault.modify(path, change);
+  const text = change(await vault.read(path));
+  await vault.write(path, text);
+  return text;
 }
 
 /** Whether *path* lies in a dot folder below *root* (.trash, .sessions): what the note tools leave out. */
@@ -57,13 +93,13 @@ export async function vaultFiles(vault: VaultPort, scope: string[] | null,
 /** Notes whose path or file name is close to *wanted* — `suggest_notes`. */
 export async function suggestNotes(vault: VaultPort, wanted: string, scope: string[] | null = null,
                                    limit = 3): Promise<string[]> {
-  const wantedClean = stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/\.md$/, "").toLowerCase();
+  const wantedClean = fold(stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/\.md$/, ""));
   if (!wantedClean) return [];
   const wantedWords = words(wantedClean);
   const scored: [number, string][] = [];
   for (const rel of await vaultNotes(vault, scope)) {
-    const noteStem = stem(rel).toLowerCase();
-    const relKey = rel.replace(/\.md$/, "").toLowerCase();
+    const noteStem = fold(stem(rel));
+    const relKey = fold(rel.replace(/\.md$/, ""));
     let score = Math.max(ratio(wantedClean, relKey), ratio(wantedClean, noteStem));
     if (relKey.includes(wantedClean) || wantedClean.includes(noteStem) || noteStem.includes(wantedClean)) {
       score = Math.max(score, 0.9);
@@ -83,20 +119,20 @@ export async function suggestNotes(vault: VaultPort, wanted: string, scope: stri
 /** Folders close to *wanted*, for a failed list_notes — `suggest_folders`. */
 export async function suggestFolders(vault: VaultPort, wanted: string, scope: string[] | null = null,
                                      limit = 3): Promise<string[]> {
-  const wantedClean = stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/^\/+|\/+$/g, "").toLowerCase();
+  const wantedClean = fold(stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/^\/+|\/+$/g, ""));
   let folders = (await vault.folders()).filter((f) => !f.split("/").some((part) => part.startsWith(".")));
   if (scope && scope.length) {
     const roots = scope.map((s) => s.replace(/\/+$/, ""));
     folders = folders.filter((f) => roots.some((s) => f === s || f.startsWith(`${s}/`)));
   }
   if (!wantedClean) return [...folders].sort().slice(0, limit);
-  const close = folders.filter((f) => f.toLowerCase().includes(wantedClean) || wantedClean.includes(f.toLowerCase()));
-  for (const f of getCloseMatches(wantedClean, folders.map((f) => f.toLowerCase()), limit, 0.6)) {
+  const close = folders.filter((f) => fold(f).includes(wantedClean) || wantedClean.includes(fold(f)));
+  for (const f of getCloseMatches(wantedClean, folders.map(fold), limit, 0.6)) {
     if (!close.includes(f)) close.push(f);
   }
   const seen: string[] = [];
   for (const folder of close) {
-    const match = folders.find((f) => f.toLowerCase() === folder.toLowerCase()) ?? folder;
+    const match = folders.find((f) => fold(f) === fold(folder)) ?? folder;
     if (!seen.includes(match)) seen.push(match);
   }
   return seen.slice(0, limit);
@@ -136,8 +172,40 @@ export async function resolveExistingNote(vault: VaultPort, path: string,
   return { note: null, error: notFound("note", path, await suggestNotes(vault, path, scope)) };
 }
 
+/**
+ * The folder *wanted* names, as given (quotes and slashes trimmed) or, when there is no such folder, the one folder
+ * whose last part has that name — "Projects" for TaskNotes/Projects (#159). The error to return otherwise.
+ */
+export async function resolveFolder(vault: VaultPort, wanted: string,
+                                    scope: string[] | null = null): Promise<{ folder: string | null; error: string }> {
+  const clean = stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/^\/+|\/+$/g, "");
+  let resolved: string;
+  try {
+    resolved = safeResolve(clean, scope);
+  } catch (error) {
+    if (error instanceof PathError) return { folder: null, error: `Error: ${error.message}` };
+    throw error;
+  }
+  if (await vault.isFolder(resolved)) return { folder: resolved, error: "" };
+  const name = basename(clean).toLowerCase();
+  const allowed = (folder: string): boolean => {
+    try {
+      safeResolve(folder, scope);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const matches = (await vault.folders())
+    .filter((folder) => !folder.split("/").some((part) => part.startsWith(".")))
+    .filter((folder) => basename(folder).toLowerCase() === name && allowed(folder));
+  if (matches.length === 1) return { folder: matches[0], error: "" };
+  return { folder: null, error: notFound("folder", wanted, await suggestFolders(vault, wanted, scope)) };
+}
+
 function words(text: string): Set<string> {
-  return new Set(text.split(/[^a-z0-9]+/).filter((w) => w.length > 2));
+  // Letters of any script: "büroumzug" is one word, not "b" and "roumzug" (#164)
+  return new Set(text.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
 }
 
 /** Python's `str.strip('"')`. */

@@ -71,14 +71,17 @@ export function makeSearchTools(vault: VaultPort, scope: string[] | null = null)
       const below = files.filter((file) => file.endsWith(".md") && (!root || file.startsWith(`${root}/`)))
         // os.walk skips folders starting with "." (.trash, .obsidian, .sessions) below the walk root
         .filter((file) => !(root ? file.slice(root.length + 1) : file).split("/").slice(0, -1).some((p) => p.startsWith(".")));
+      // The folder is checked before a note is read, and the read comes from Obsidian's cache where it has one:
+      // a search over a large vault no longer reads every note from disk (#164)
+      const read = vault.cachedRead ?? vault.read;
       for (const rel of walkOrder(below)) {
+        if (wantedFolder && !rel.toLowerCase().startsWith(`${wantedFolder}/`)) continue;
         let content: string;
         try {
-          content = await vault.read(rel);
+          content = await read.call(vault, rel);
         } catch {
           continue;
         }
-        if (wantedFolder && !rel.toLowerCase().startsWith(`${wantedFolder}/`)) continue;
         if (wantedTag && !noteTags(content).has(wantedTag)) continue;
         if (!queryLower || content.toLowerCase().includes(queryLower)) {
           const idx = queryLower ? Math.max(content.toLowerCase().indexOf(queryLower), 0) : 0;

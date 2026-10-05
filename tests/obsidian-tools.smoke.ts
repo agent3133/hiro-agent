@@ -13,12 +13,15 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** A one-page PDF, built with the byte offsets its cross-reference table needs. */
-function onePagePdf(): Buffer {
+function onePagePdf(text = "Smoke page"): Buffer {
+  const stream = `BT /F1 18 Tf 20 40 Td (${text}) Tj ET`;
+  // Wide enough for the whole line: pdf.js gives only the text that lies on the page (2026-10-05)
+  const width = Math.max(200, 40 + text.length * 12);
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-    "<< /Length 40 >>\nstream\nBT /F1 18 Tf 20 40 Td (Smoke page) Tj ET\nendstream",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ];
   let body = "%PDF-1.4\n";
@@ -38,7 +41,10 @@ const ATTACHMENTS: Record<string, Buffer> = {
   // A 1×1 PNG
   "pixel.png": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
   "one page.pdf": onePagePdf(),
+  // Enough text per page that the PDF is read as text by default (#246)
+  "text page.pdf": onePagePdf("Invoice 2026-118. ".repeat(14).trim()),
   "data.csv": Buffer.from("a,b\n1,2\n"),
+  "archive.zip": Buffer.from("PK not really a zip"),
   "voice.mp3": Buffer.from("not really audio"),
 };
 
@@ -68,6 +74,13 @@ if (reload.error || !/Reloaded/.test(reload.stdout ?? "")) {
   console.log("Is Obsidian running with this vault, and the `obsidian` command on PATH?");
   process.exit(2);
 }
+// move_note with link updates is refused while Obsidian is minimized (#207), and the suite moves notes: say so
+const visibility = spawnSync("obsidian", [`vault=${vault}`, "eval", "code=activeDocument.visibilityState"],
+                             { encoding: "utf-8", timeout: 30_000 }).stdout ?? "";
+if (visibility.includes("hidden")) {
+  console.log("Obsidian's window is minimized: moving notes is refused then (#207). Bring the window up and run again.");
+  process.exit(2);
+}
 const answers = (text: string): boolean => text.startsWith("#") || text.startsWith("No tags");
 let probe = "";
 for (let attempt = 0; attempt < 20 && !answers(probe); attempt++) {
@@ -84,14 +97,18 @@ const ALPHA = `${DIR}/Alpha.md`;
 const BETA = `${DIR}/Beta.md`;
 const GAMMA = `${DIR}/Sub/Gamma.md`;
 const NAMESAKE = `${DIR}/Other/Alpha.md`;
+const LONELY = `${DIR}/Lonely.md`;
+const LONELY_NAMESAKE = `${DIR}/Other/Lonely.md`;
+const LONELY_MOVED = `${DIR}/Lonely moved.md`;
 // The test vault keeps its templates in Templates/ (templates.json); the smoke template is removed again
 const TEMPLATE = "Templates/_agent-smoke template.md";
 const FROM_TEMPLATE = `${DIR}/From template.md`;
+const EMBEDS = `${DIR}/Embeds.md`;
 const pad = (n: number): string => String(n).padStart(2, "0");
 const now = new Date();
 const TODAY = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 function cleanUp(): void {
-  for (const path of [ALPHA, BETA, GAMMA, NAMESAKE, TEMPLATE, FROM_TEMPLATE]) {
+  for (const path of [ALPHA, BETA, GAMMA, NAMESAKE, LONELY, LONELY_NAMESAKE, LONELY_MOVED, TEMPLATE, FROM_TEMPLATE, EMBEDS]) {
     confirmed("delete_note", { path, permanent: true });
   }
 }
@@ -110,6 +127,11 @@ try {
   check("outlinks are resolved paths, a missing note marked", out === `${BETA}\nMissing Note (unresolved)`, out);
   const broken = tool("find_broken_links");
   check("a broken link is listed", broken.includes(`${ALPHA} -> Missing Note`), broken);
+  // A scoped agent sees only its folders' broken links (#167)
+  const scopedBroken = tool("find_broken_links", {}, [`scope=${DIR}/Sub`]);
+  check("find_broken_links keeps to the agent's folders", !scopedBroken.includes(ALPHA), scopedBroken);
+  check("note_outline on a note without headings says so", tool("note_outline", { path: BETA }) === "No headings in this note",
+        tool("note_outline", { path: BETA }));
 
   // Tags, tasks and headings
   const tags = tool("list_tags", {}, [`scope=${DIR}`]);
@@ -147,14 +169,38 @@ try {
   const plain = confirmed("move_note", { from_path: ALPHA, to_path: `${DIR}/Renamed`, update_links: false });
   check("with update_links=false it moves", plain === `Moved note from '${ALPHA}' to '${DIR}/Renamed.md'`, plain);
   confirmed("move_note", { from_path: `${DIR}/Renamed`, to_path: ALPHA, update_links: false });
+  // "Rename X to Y" with just "Y": a rename in place, not a move to the vault root (#229)
+  const inPlace = confirmed("move_note", { from_path: ALPHA, to_path: "Alpha renamed", update_links: false });
+  check("a new name without a folder keeps the note's folder (#229)",
+        inPlace === `Moved note from '${ALPHA}' to '${DIR}/Alpha renamed.md'`, inPlace);
+  confirmed("move_note", { from_path: `${DIR}/Alpha renamed`, to_path: "Alpha", update_links: false });
+  // An agent limited to some folders hears that a namesake exists elsewhere, not where (#162)
+  const scoped = tool("move_note", { from_path: ALPHA, to_path: `${DIR}/Renamed` },
+                      ["confirm", `scope=${DIR}/Alpha.md,${DIR}/Renamed.md,${DIR}/Sub`]);
+  check("a namesake outside the agent's folders is counted, not named",
+        scoped.includes("1 outside the folders you may use") && !scoped.includes(NAMESAKE), scoped);
+  // A namesake no note links to by name leaves nothing to rewrite: the move goes ahead (#162)
+  tool("create_note", { path: LONELY, content: "Nobody links here.\n" });
+  tool("create_note", { path: LONELY_NAMESAKE, content: "Nor here.\n" });
+  const lonely = confirmed("move_note", { from_path: LONELY, to_path: LONELY_MOVED });
+  check("a note with a namesake but no links by name moves with update_links",
+        lonely === `Moved note from '${LONELY}' to '${LONELY_MOVED}'`, lonely);
   check("open_in_obsidian opens it", tool("open_in_obsidian", { path: ALPHA }) === `Opened '${ALPHA}' in Obsidian`);
   const deleted = confirmed("delete_note", { path: GAMMA });
   check("delete_note uses the vault's trash setting", /^(Moved note|Deleted note)/.test(deleted), deleted);
   check("a deleted note is gone", tool("read_note", { path: GAMMA }).startsWith("Error: note not found"));
+  // Nothing to delete or move: no question, the error at once (2026-10-05)
+  check("delete_note of a missing note fails without asking",
+        tool("delete_note", { path: GAMMA }).startsWith("Error: note not found"), tool("delete_note", { path: GAMMA }));
+  check("move_note of a missing note fails without asking",
+        tool("move_note", { from_path: GAMMA, to_path: "Nowhere.md" }).startsWith("Error: source note not found"));
 
   // Core plugins and TaskNotes (#82)
-  check("daily_note follows the Daily notes settings", tool("daily_note") === `Journal/Daily/${TODAY}.md`, tool("daily_note"));
-  check("daily_note for a given day", tool("daily_note", { date: "2026-01-05" }) === "Journal/Daily/2026-01-05.md");
+  // The path on the first line; a note that does not exist yet says so on the next (2026-10-05)
+  const today = tool("daily_note");
+  check("daily_note follows the Daily notes settings", today.split("\n")[0] === `Journal/Daily/${TODAY}.md`, today);
+  check("daily_note for a day without a note says it is not created yet",
+        tool("daily_note", { date: "2026-01-05" }) === "Journal/Daily/2026-01-05.md\n[Not created yet.]");
   check("a date that is not one says so", tool("daily_note", { date: "soon" }).startsWith("Error: 'soon' is not a date"));
   tool("create_note", { path: TEMPLATE, content: "# {{title}}\nDate: {{date}}\nYear: {{date:YYYY}}\n" });
   const templates = tool("list_templates");
@@ -180,12 +226,12 @@ try {
   }
   check("a scoped agent has no create_tasknote", tool("create_tasknote", { title: "x" }, ["scope=Elsewhere"])
         === "Error: no tool 'create_tasknote'");
-  check("there is no query_base", tool("query_base", { base: "x" }) === "Error: no tool 'query_base'");
 
   // Web (#84) — needs a network connection
   const page = tool("web_fetch", { url: "http://example.com" });
+  // example.com dropped its heading and link in 2026: its title and its one sentence are what is left
   check("web_fetch reads a page as Markdown, headed by its title (http becomes https)",
-        page.startsWith("# Example Domain") && page.includes("[Learn more](https://iana.org/"), page.slice(0, 200));
+        page.startsWith("# Example Domain") && page.includes("for use in documentation examples"), page.slice(0, 200));
   check("an unreachable page says so", tool("web_fetch", { url: "https://nothing.invalid/" }).startsWith("Error: Could not fetch URL:"));
   check("there is no web_search", tool("web_search", { query: "x" }) === "Error: no tool 'web_search'");
 
@@ -204,14 +250,63 @@ try {
           tool("read_attachment", { path: "pixel.png" }) === "Image 'pixel.png':\n[image]");
     const pdf = tool("read_attachment", { path: `${DIR}/one page.pdf` });
     check("a PDF is rendered page by page", pdf === `PDF '${DIR}/one page.pdf' — 1 page(s):\nPage 1/1:\n[image]`, pdf);
-    check("an unsupported type says so", tool("read_attachment", { path: `${DIR}/data.csv` })
-          .startsWith("Error: unsupported attachment type '.csv'"));
+    // Its text layer, for models without vision, and a page it does not have (#166, #167)
+    const pdfText = tool("read_attachment", { path: `${DIR}/one page.pdf`, as_text: true });
+    check("a PDF's text with as_text", pdfText === `PDF '${DIR}/one page.pdf' — 1 page(s), as text:\n\nPage 1/1:\nSmoke page`, pdfText);
+    // A PDF with a text layer comes as text unless images are asked for; one with too little text stays images (#246)
+    const textPdf = tool("read_attachment", { path: `${DIR}/text page.pdf` });
+    check("a PDF with a text layer is read as text by default", textPdf.startsWith(`PDF '${DIR}/text page.pdf' — 1 page(s), as text:`)
+          && textPdf.includes("Invoice 2026-118.") && textPdf.endsWith("read it with as_text false.]"), textPdf);
+    const textPdfImages = tool("read_attachment", { path: `${DIR}/text page.pdf`, as_text: false });
+    check("as_text false shows its pages", textPdfImages === `PDF '${DIR}/text page.pdf' — 1 page(s):\nPage 1/1:\n[image]`, textPdfImages);
+    check("a page the PDF does not have says so", tool("read_attachment", { path: `${DIR}/one page.pdf`, pages: "2" })
+          === "Error: the PDF has pages 1-1; '2' is not among them");
+    const csv = tool("read_attachment", { path: `${DIR}/data.csv` });
+    check("a CSV file is read as text (#210)", csv === `File '${DIR}/data.csv' — 2 lines:\n\na,b\n1,2`, csv);
+    check("an unsupported type says so", tool("read_attachment", { path: `${DIR}/archive.zip` })
+          .startsWith("Error: unsupported attachment type '.zip'"));
     check("a broken recording says why it was not transcribed",
           tool("read_attachment", { path: `${DIR}/voice.mp3` }).startsWith("Error: could not transcribe 'voice.mp3'"),
           tool("read_attachment", { path: `${DIR}/voice.mp3` }));
     check("a missing attachment says so", tool("read_attachment", { path: "nothing-here.png" })
           === "Error: attachment 'nothing-here.png' not found anywhere in the vault");
+
+    // Attachments move and go to the trash like notes, their embeds following them (#215)
+    tool("create_note", { path: EMBEDS, content: "Look: ![[pixel.png]]\n" });
+    let movedImage = "";
+    for (let attempt = 0; attempt < 10 && !movedImage.startsWith("Moved"); attempt++) {
+      if (attempt) spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 300)"]);
+      movedImage = confirmed("move_note", { from_path: "pixel.png", to_path: `${DIR}/Images/dot` });
+    }
+    check("move_note moves an attachment by its bare name, keeping its extension",
+          movedImage.startsWith(`Moved attachment from '${DIR}/pixel.png' to '${DIR}/Images/dot.png'; updated links in 1 note(s)`)
+          && movedImage.includes("Undo does not cover attachments"), movedImage);
+    check("…and the embed follows it", tool("read_note", { path: EMBEDS }).includes("![[dot.png]]")
+          || tool("read_note", { path: EMBEDS }).includes("Images/dot.png"), tool("read_note", { path: EMBEDS }));
+    const trashed = confirmed("delete_note", { path: `${DIR}/Images/dot.png`, permanent: true });
+    check("delete_note deletes an attachment", trashed.startsWith(`Deleted attachment at '${DIR}/Images/dot.png' permanently`), trashed);
     for (const name of Object.keys(ATTACHMENTS)) rmSync(join(vaultPath, DIR, name), { force: true });
+
+    // Bases (#230): a .base file by its name, and a definition whose `this.file` is the note named
+    writeFileSync(join(vaultPath, DIR, "Smoke.base"), `filters:\n  and:\n    - file.inFolder("${DIR}")\n    - file.ext == "md"\n`
+      + "views:\n  - type: table\n    name: Notes\n    order: [file.name]\n    sort:\n      - property: file.name\n        direction: ASC\n");
+    let based = "";
+    for (let attempt = 0; attempt < 10 && !based.startsWith("Base "); attempt++) {
+      if (attempt) spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 300)"]);
+      based = tool("query_base", { base: "Smoke" });
+    }
+    check("query_base runs a .base file found by its name", based.startsWith(`Base '${DIR}/Smoke.base', view 'Notes' — `)
+          && based.includes(`| ${ALPHA} |`), based.slice(0, 300));
+    const own = tool("query_base", { definition: "filters:\n  and:\n    - file.path == this.file.path\n", note: ALPHA });
+    check("…and a definition, with this.file meaning the note given", own.includes(`| ${ALPHA} |`) && own.includes("— 1 row:"),
+          own.slice(0, 300));
+    // A definition that matches nothing gets the filter syntax with the answer (#246)
+    const nothing = tool("query_base", { definition: "filters:\n  and:\n    - file.hasTag(\"no-such-tag-anywhere\")\n" });
+    check("a definition that matches nothing says how filters are written", nothing.includes("no note matches its filters")
+          && nothing.includes("A definition's filters, for example:"), nothing);
+    check("…and is withheld from an agent limited to some folders", tool("query_base", { base: "Smoke" }, [`scope=${DIR}`])
+          === "Error: no tool 'query_base'");
+    rmSync(join(vaultPath, DIR, "Smoke.base"), { force: true });
 
     // Recordings (#84): whisper.cpp and ffmpeg, as the runtime's audio settings name them
     const made = (name: string, args: string[]): boolean =>

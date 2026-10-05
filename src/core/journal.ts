@@ -9,7 +9,7 @@
  */
 
 import { linesKeepEnds, unifiedDiff } from "./difflib";
-import type { VaultPort } from "./vault";
+import { modifyFile, type VaultPort } from "./vault";
 
 export type Op = "create" | "modify" | "delete" | "move";
 
@@ -153,6 +153,16 @@ export function journalled(vault: VaultPort, journal: Journal): VaultPort {
       const before = await current(path);
       await vault.write(path, text);
       journal.record({ op: before === null ? "create" : "modify", path, before, after: text });
+    },
+    modify: async (path, change) => {
+      // What the change was applied to, as the port had it at that moment
+      let before = "";
+      const after = await modifyFile(vault, path, (text) => {
+        before = text;
+        return change(text);
+      });
+      journal.record({ op: "modify", path, before, after });
+      return after;
     },
     remove: async (path) => {
       const before = await current(path);

@@ -11,6 +11,7 @@ export const FEATURES: { path: string; label: string; more: string[] }[] = [
   { path: "builtin_tools.web_fetch.enabled", label: "Open web pages",
     more: ["builtin_tools.web_fetch.timeout", "builtin_tools.web_fetch.max_content_length"] },
   { path: "journal.enabled", label: "Undo agent changes", more: ["journal.turns", "journal.max_mb"] },
+  { path: "vault.save_tool_calls", label: "Save tool calls with conversations", more: [] },
   { path: "memory.enabled", label: "Memory",
     more: ["memory.profile_path", "memory.max_profile_tokens", "memory.inject_into_system_prompt"] },
   { path: "audio.enabled", label: "Audio transcription",

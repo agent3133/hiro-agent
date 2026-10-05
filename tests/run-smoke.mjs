@@ -8,7 +8,7 @@ import { join } from "node:path";
 const vault = process.argv[2];
 const entry = process.argv[3];
 if (!vault || !entry) {
-  console.error("usage: node tests/run-smoke.mjs <vault path> <test file>");
+  console.error("usage: node tests/run-smoke.mjs <vault path> <test file> [suite arguments]");
   process.exit(2);
 }
 
@@ -17,7 +17,8 @@ const outfile = join(dir, "smoke.mjs");
 await build({ entryPoints: [entry], outfile, bundle: true, platform: "node",
               format: "esm", target: "node20", logLevel: "warning" });
 
-const child = spawn(process.execPath, [outfile, vault], { stdio: "inherit" });
+// Anything after the test file goes to the suite (obsidian-app.smoke.ts: reload, ui, model)
+const child = spawn(process.execPath, [outfile, vault, ...process.argv.slice(4)], { stdio: "inherit" });
 child.on("exit", async (code) => {
   await rm(dir, { recursive: true, force: true });
   process.exit(code ?? 1);

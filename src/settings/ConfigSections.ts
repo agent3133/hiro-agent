@@ -122,8 +122,12 @@ export function renderField(container: HTMLElement, field: ConfigField, host: Co
       break;
     case "enum":
       setting.addDropdown((dropdown) => {
-        dropdown.addOption("", `default (${display(field.defaultValue) || "none"})`);
-        for (const option of field.options) dropdown.addOption(option, option);
+        // "not set" when there is no default: "default (none)" read like a choice, next to a real `none` (2026-10-05)
+        // Values read as words: chat_completions as "chat completions"
+        const words = (option: string): string => option.replace(/_/g, " ");
+        const fallback = display(field.defaultValue);
+        dropdown.addOption("", fallback ? `default (${words(fallback)})` : "not set");
+        for (const option of field.options) dropdown.addOption(option, words(option));
         dropdown.setValue(display(field.value));
         dropdown.onChange((value) => void send(value));
       });

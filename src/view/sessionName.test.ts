@@ -23,6 +23,10 @@ describe("sessionNameFor", () => {
     );
   });
 
+  it("folds umlauts and ß to their base letters rather than dropping them (#164)", () => {
+    expect(sessionNameFor("Grüße an Maria, Straße", now)).toBe("2026-09-23-1432-grusse-an-maria-strasse");
+  });
+
   it("returns just the stamp when the prompt has no letters or digits", () => {
     expect(sessionNameFor("???", now)).toBe("2026-09-23-1432");
   });

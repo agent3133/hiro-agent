@@ -29,6 +29,8 @@ export interface TurnEvents {
   onUsage?(tokens: number, estimated: boolean): void;
   /** Older tool results of this answer were set aside so the next request fits the window (#154); *total* so far. */
   onSetAside?(total: number): void;
+  /** After each model call whose server said it: the service tier that served it (#295). */
+  onServiceTier?(tier: string): void;
 }
 
 /**
@@ -180,7 +182,7 @@ export function turnFailure(error: unknown): string {
     const sizes = error.promptTokens && error.contextSize
       ? ` It needs ${count(error.promptTokens)} tokens; the model takes ${count(error.contextSize)}.` : "";
     return `This turn no longer fits the model's context window.${sizes} Usually one tool result was too long, `
-      + "such as a whole web page or a long note. Try again asking for less, start a new conversation (+), or "
+      + "such as a whole web page or a long note. Try again asking for less, start a new conversation, or "
       + "give the model a larger context window (llama-server's -c).";
   }
   // Node's network errors, which say only a code: what that means for the model server
@@ -197,6 +199,54 @@ export function turnFailure(error: unknown): string {
     return `The model server cannot be reached (${String(code)}). Check the connection's address and the network.`;
   }
   return `The turn failed: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/** What one image costs the window, in tokens, for counting: a page or a frame, as vision models encode them. */
+const IMAGE_TOKENS = 1000;
+
+/**
+ * A result with images (read_attachment: PDF pages, video frames) fitted to *limit* characters (#160): as many
+ * images as the room holds, at least one, the rest named as left out; its words as fitToolResult cuts them.
+ */
+export function fitContent(parts: ContentPart[], limit: number): ContentPart[] {
+  if (!Number.isFinite(limit)) return parts;
+  const images = parts.filter((part) => part.type === "image_url").length;
+  const room = Math.max(1, Math.floor(limit / ESTIMATE_CHARS_PER_TOKEN / IMAGE_TOKENS));
+  if (images <= room) return parts;
+  // An image left out goes with the label just before it ("Page 3/40:"), which would otherwise name nothing
+  const isLabel = (part: ContentPart | undefined): boolean =>
+    part?.type === "text" && /^(Page|Frame) \d+/.test(part.text);
+  const kept: ContentPart[] = [];
+  const droppedPages: number[] = [];
+  let shown = 0;
+  parts.forEach((part, index) => {
+    if (part.type === "image_url") {
+      if (shown < room) kept.push(part);
+      shown += 1;
+      return;
+    }
+    const nextIsDropped = isLabel(part) && parts[index + 1]?.type === "image_url" && shown >= room;
+    if (!nextIsDropped) kept.push(part);
+    const page = nextIsDropped ? /^Page (\d+)/.exec(part.text) : null;
+    if (page) droppedPages.push(Number(page[1]));
+  });
+  kept.push({ type: "text", text: leftOutNote(images - room, room, droppedPages) });
+  return kept;
+}
+
+/**
+ * What fitContent says about the images it left out (#251). For PDF pages it names them and the next call: a model
+ * told only "ask for fewer" read the first 8 pages of a 30-page report and answered that the report did not say.
+ */
+function leftOutNote(dropped: number, room: number, pages: number[]): string {
+  if (!pages.length) {
+    return `[${dropped} more image(s) left out to stay inside the context window — ask for fewer, e.g. specific pages]`;
+  }
+  const first = pages[0];
+  const last = pages[pages.length - 1];
+  const next = `${first}-${Math.min(last, first + room - 1)}`;
+  return `[Pages ${first}-${last} left out to stay inside the context window. Read them with pages '${next}' and `
+    + "onwards, a few at a time, or read the PDF with as_text, which is far smaller.]";
 }
 
 /** *result* cut to *limit* characters, saying so to the model; as it was when it fits. */
@@ -238,7 +288,13 @@ export function stepLimitNote(maxIterations: number): string {
          + "are saved; tell me how to continue, or give a smaller next step.]";
 }
 
-export const REASONING_ONLY_NOTE = "[Agent stopped: the model produced only reasoning content "
+/** The answer to a call the user declined: what declining means, not only that it happened (#262). */
+export function declined(toolName: string): string {
+  return `Error: the user declined to run '${toolName}'. Do not make the same change another way; tell the user `
+         + "it was not done.";
+}
+
+export const REASONING_ONLY_NOTE ="[Agent stopped: the model produced only reasoning content "
   + "after the last tool call. Try disabling thinking mode (/think) "
   + "or add --reasoning-budget 1024 to your llama-server startup flags.]";
 
@@ -304,6 +360,7 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
       signal,
     );
     lastCompletion = completion;
+    if (completion.serviceTier) events.onServiceTier?.(completion.serviceTier);
     if (completion.usage?.promptTokens) {
       ratio = Math.min(3, Math.max(0.3, completion.usage.promptTokens / Math.max(1, estimateRequest(messages, schemas))));
     }
@@ -323,7 +380,8 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
     // history parses them, and llama.cpp refuses the whole request over one broken call
     const cutOff = new Set(completion.toolCalls.filter((call) => !isJsonObjectText(call.arguments)).map((call) => call.id));
     messages.push({ role: "assistant", content: completion.content,
-                    tool_calls: completion.toolCalls.map((call) => (cutOff.has(call.id) ? { ...call, arguments: "{}" } : call)) });
+                    tool_calls: completion.toolCalls.map((call) => (cutOff.has(call.id) ? { ...call, arguments: "{}" } : call)),
+                    ...(completion.reasoningItems ? { reasoning_items: completion.reasoningItems } : {}) });
     // Each new result gets its share of the room the window has left, at least MIN_RESULT_CHARS
     const room = window
       ? Math.max(MIN_RESULT_CHARS, Math.floor(((fitLimit(window) - measure()) / Math.max(ratio, 0.1)) * ESTIMATE_CHARS_PER_TOKEN
@@ -332,10 +390,11 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
     const limit = Math.min(options.maxToolResultChars ?? Infinity, room);
     for (const call of completion.toolCalls) {
       signal?.throwIfAborted();
-      const output = await callTool(byName, call, events, options.confirm);
+      const output = await callTool(byName, call, events, options.confirm, limit);
       // The failure streak reads the words; a result with images is never a failure
       const noted = streak.note(call.name, textOf(output));
-      const result = typeof output === "string" ? fitToolResult(noted, Number.isFinite(limit) ? limit : undefined) : output;
+      const result = typeof output === "string" ? fitToolResult(noted, Number.isFinite(limit) ? limit : undefined)
+        : fitContent(output, limit);
       toolCalls++;
       events.onToolResult?.(call.id, textOf(result), typeof result === "string" && result.startsWith("Error:"));
       messages.push({ role: "tool", content: result, tool_call_id: call.id });
@@ -369,7 +428,7 @@ function isJsonObjectText(text: string): boolean {
 }
 
 async function callTool(byName: Map<string, Tool>, call: ToolCallRequest, events: TurnEvents,
-                        confirm: Confirm | undefined): Promise<string | ContentPart[]> {
+                        confirm: Confirm | undefined, room = Infinity): Promise<string | ContentPart[]> {
   let input: unknown = call.arguments;
   try {
     input = call.arguments.trim() ? JSON.parse(call.arguments) : {};
@@ -402,8 +461,11 @@ async function callTool(byName: Map<string, Tool>, call: ToolCallRequest, events
       // Best effort, and only for display: a resolver that fails shows the arguments as they came (runner.py)
       const asked = args;
       const shownArgs = await (tool.confirmArgs?.(asked) ?? Promise.resolve(confirmArgs(asked))).catch(() => asked);
-      if (!(await confirm(call.id, tool.name, shownArgs))) return `Error: the user declined to run '${tool.name}'.`;
+      // Said in full: after a declined update_note, models emptied the note with edit_note and called it done (#262)
+      if (!(await confirm(call.id, tool.name, shownArgs))) return declined(tool.name);
     }
+    // A tool that fits its own answer gets the room it has (#160); the others are cut afterwards, as before
+    if (tool.runWithin && Number.isFinite(room)) return await tool.runWithin(args, room);
     return await (tool.runContent ?? tool.run)(args);
   } catch (error) {
     return toolErrorText(error);

@@ -39,6 +39,11 @@ export interface Tool extends ToolSpec {
    * answer in words, for the chat view and the command line.
    */
   runContent?(args: Record<string, unknown>): Promise<string | ContentPart[]>;
+  /**
+   * For a tool whose answer is several parts (read_notes): the answer fitted to *room* characters by the tool itself,
+   * each part getting its share, rather than cut blindly at the end where the last parts would vanish (#160).
+   */
+  runWithin?(args: Record<string, unknown>, room: number): Promise<string>;
 }
 
 /** A tool with the spec exported from Python and *run* as its body. */
@@ -49,16 +54,20 @@ export function defineTool(name: string, run: (args: Args) => Promise<string>,
                              /** Replaces the exported description, where the plugin's tool works differently. */
                              description?: string;
                              content?: (args: Args) => Promise<string | ContentPart[]>;
+                             /** The answer fitted to *room* characters (Tool.runWithin). */
+                             within?: (args: Args, room: number) => Promise<string>;
                            } = {}): Tool {
   const exported = (specs as unknown as ToolSpec[]).find((s) => s.name === name);
   if (!exported) throw new Error(`no spec for tool '${name}' in specs.json`);
   const spec = options.description ? { ...exported, description: options.description } : exported;
   const content = options.content;
+  const within = options.within;
   const when = options.destructiveWhen;
   return { ...spec, run: (raw) => run(readArgs(spec, raw)), destructive: options.destructive ?? false,
            destructiveWhen: when ? (raw) => when(readArgs(spec, raw)) : undefined,
            validate: (raw) => void readArgs(spec, raw), confirmArgs: options.confirmArgs,
-           runContent: content ? (raw) => content(readArgs(spec, raw)) : undefined };
+           runContent: content ? (raw) => content(readArgs(spec, raw)) : undefined,
+           runWithin: within ? (raw, room) => within(readArgs(spec, raw), room) : undefined };
 }
 
 /** Arguments as the tool body reads them: defaults filled in, strings a model sent for numbers and booleans read. */

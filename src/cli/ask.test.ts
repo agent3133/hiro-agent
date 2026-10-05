@@ -75,6 +75,12 @@ describe("agent:ask, before the turn", () => {
 });
 
 describe("agent:ask, the turn", () => {
+  it("sends a selection with the note, as the chat does", async () => {
+    const made = fake();
+    await started(made, { prompt: "Make a checklist of this", note: "Notes/a.md", selection: "milk\neggs" });
+    expect(made.sent[0].options.context).toEqual({ active_note: "Notes/a.md", selection: "milk\neggs" });
+  });
+
   it("runs the default agent in a new saved conversation, with the note as context, and prints the reply", async () => {
     const made = fake();
     const { answer } = await started(made, { prompt: "Summarise it", note: "Notes/a.md", connection: "cloud" });

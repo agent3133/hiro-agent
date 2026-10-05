@@ -7,7 +7,16 @@ describe("kindOf", () => {
   it("classifies scan.pdf as pdf", () => expect(kindOf("scan.pdf")).toBe("pdf"));
   it("classifies memo.m4a as audio", () => expect(kindOf("memo.m4a")).toBe("audio"));
   it("classifies clip.webm as video", () => expect(kindOf("clip.webm")).toBe("video"));
-  it("returns null for notes.docx", () => expect(kindOf("notes.docx")).toBe(null));
+  // Office documents and text files are read as text since #210/#211; the old binary formats are not
+  it("returns document for notes.docx, budget.xlsx and data.csv", () => {
+    expect(kindOf("notes.docx")).toBe("document");
+    expect(kindOf("budget.xlsx")).toBe("document");
+    expect(kindOf("data.csv")).toBe("document");
+  });
+  it("returns null for the old binary notes.doc and an archive", () => {
+    expect(kindOf("notes.doc")).toBe(null);
+    expect(kindOf("files.zip")).toBe(null);
+  });
   it("returns null for README", () => expect(kindOf("README")).toBe(null));
 });
 
@@ -23,8 +32,8 @@ describe("checkAttachment", () => {
       error: "photo.png is 21 MB; an image may be at most 20 MB."
     }));
   it("returns error for unsupported kind", () =>
-    expect(checkAttachment("notes.docx", 10)).toEqual({
-      error: "notes.docx can't be added: the agent reads images, PDFs, recordings and videos."
+    expect(checkAttachment("notes.doc", 10)).toEqual({
+      error: "notes.doc can't be added: the agent reads images, PDFs, recordings, videos, Office documents and text files."
     }));
 });
 

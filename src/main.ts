@@ -12,9 +12,11 @@ import { messageOf } from "./core/errors";
 import { AgentSettingTab, DEFAULT_SETTINGS, OBSOLETE_SETTINGS, type PluginSettings } from "./settings";
 import { renderContextStatus } from "./view/contextStatus";
 import { CHAT_VIEW_TYPE, ChatView } from "./view/ChatView";
+import { keptSelection } from "./view/keptSelection";
+import { registerBasesQuery } from "./vault/basesQuery";
 import { ConfirmModal } from "./view/ConfirmModal";
 import { sessionNameFor } from "./view/sessionName";
-import { InProcessAgent } from "./inprocess/InProcessAgent";
+import { InProcessAgent, type PromptAsSent, type PromptDraft } from "./inprocess/InProcessAgent";
 import { AgentCatalog } from "./config/agents";
 import { PluginBackend } from "./config/backend";
 import { defaultProfileName, hasConnection, migrateBareLlm, profileSummaries, resolveConnection } from "./config/connections";
@@ -254,6 +256,10 @@ export default class ObsidianAgentPlugin extends Plugin {
       },
     });
 
+    // The note's selection stays visible while the cursor is in the chat (#218)
+    this.registerEditorExtension(keptSelection);
+    // query_base reads a Base's rows through a view type of the plugin's own (#230)
+    registerBasesQuery(this);
     this.registerView(CHAT_VIEW_TYPE, (leaf: WorkspaceLeaf) => new ChatView(leaf, {
       agent: () => this.inProcess,
       defaultAgent: () => this.defaultAgent(),
@@ -288,6 +294,21 @@ export default class ObsidianAgentPlugin extends Plugin {
         this.settings.lastSession = name;
         void this.saveSettings();
       },
+      used: (view) => {
+        if (this.lastChat === view) return;
+        this.lastChat = view;
+        renderContextStatus(this.contextStatus(), view.contextUsage());
+      },
+      current: (view) => this.lastChat === view || !this.lastChat,
+      openElsewhere: (name, view, reveal) => {
+        const other = this.chatViews().find((chat) => chat !== view && chat.session() === name);
+        if (other && reveal) void this.app.workspace.revealLeaf(other.leaf);
+        return Boolean(other);
+      },
+      // The other chats list the conversations again after an answer or a rename (#286)
+      sessionsChanged: (view) => {
+        for (const chat of this.chatViews()) if (chat !== view) void chat.followRename();
+      },
     }));
     this.addRibbonIcon("bot", "Hiro Agent", () => void this.openChat());
 
@@ -296,6 +317,22 @@ export default class ObsidianAgentPlugin extends Plugin {
       id: "open-chat",
       name: "Open the chat",
       callback: () => void this.openChat(),
+    });
+    // Another chat beside the first, with a conversation of its own (#153)
+    this.addCommand({
+      id: "new-chat-window",
+      name: "New chat window",
+      callback: () => void this.newChatWindow(),
+    });
+
+    // The conversation of the chat used last (#286)
+    this.addCommand({
+      id: "rename-conversation",
+      name: "Rename conversation",
+      callback: async () => {
+        await this.openChat();
+        this.currentChat()?.renameConversation();
+      },
     });
     this.commands = new AgentCommands(this, {
       agents: () => this.pluginBackend.info().agents,
@@ -343,20 +380,44 @@ export default class ObsidianAgentPlugin extends Plugin {
     return this.pluginBackend.info().agents.find((agent) => agent.default)?.name ?? "assistant";
   }
 
-  /** A command's request: open the chat and run it there, in a new conversation. */
-  private async runRequest(agent: string, message: string, context: NoteContext | undefined): Promise<void> {
-    await this.openChat();
-    const view = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0]?.view;
-    if (view instanceof ChatView) await view.runRequest(agent, message, context);
+  /** The chat used last — focused or sent from — while it is open (#153). */
+  private lastChat: ChatView | null = null;
+
+  /** The open chat views, in the workspace's order. */
+  private chatViews(): ChatView[] {
+    return this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE).map((leaf) => leaf.view)
+      .filter((view): view is ChatView => view instanceof ChatView);
   }
 
-  /** Reveal the chat in the right sidebar, creating it the first time. */
+  /** The chat used last if it is still open, else the first; null when none is open. */
+  private currentChat(): ChatView | null {
+    const views = this.chatViews();
+    return this.lastChat && views.includes(this.lastChat) ? this.lastChat : views[0] ?? null;
+  }
+
+  /** A command's request: run in the chat used last, in a new conversation, opening a chat when there is none. */
+  private async runRequest(agent: string, message: string, context: NoteContext | undefined): Promise<void> {
+    await this.openChat();
+    const view = this.currentChat();
+    if (view) await view.runRequest(agent, message, context);
+  }
+
+  /** Reveal the chat used last in the right sidebar, creating one the first time. */
   async openChat(): Promise<void> {
-    const existing = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE);
-    const leaf = existing[0] ?? this.app.workspace.getRightLeaf(false);
+    const current = this.currentChat();
+    const leaf = current?.leaf ?? this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
-    if (!existing.length) await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+    if (!current) await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /** Another chat view, as a new tab in the right sidebar; it starts a conversation of its own (#153). */
+  async newChatWindow(): Promise<void> {
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    if (leaf.view instanceof ChatView) this.lastChat = leaf.view;
   }
 
   async loadSettings(): Promise<void> {
@@ -393,6 +454,11 @@ export default class ObsidianAgentPlugin extends Plugin {
     // An MCP server that was removed, switched off or changed is closed; the next use starts it as it is now
     await this.mcpService.sync().catch((error) => this.addLog(`Could not update the MCP servers: ${messageOf(error)}`));
     for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) (leaf.view as ChatView).refreshProfiles();
+  }
+
+  /** An agent's system prompt as its next turn would send it, for the Agents tab's "Show as sent" (#67). */
+  promptAsSent(name: string, draft: PromptDraft): Promise<PromptAsSent> {
+    return this.inProcess.promptAsSent(name, draft);
   }
 
   /** After the Agents tab created, changed or deleted one: the chat's picker and the commands follow. */

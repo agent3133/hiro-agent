@@ -12,7 +12,7 @@
 import { readFrontmatter, setFrontmatter } from "../frontmatter";
 import { checkNoteName, noteFile, PathError, safeResolve } from "../paths";
 import { pyJson, pyRepr } from "../python";
-import { notFound, resolveExistingNote, suggestNotes, type VaultPort } from "../vault";
+import { modifyFile, resolveExistingNote, type VaultPort } from "../vault";
 import { defineTool, type Tool } from "./tool";
 
 type Value = string | number | boolean | Value[] | { [key: string]: Value };
@@ -95,13 +95,25 @@ export function makeMetadataTools(vault: VaultPort, scope: string[] | null = nul
       if (error instanceof PathError) return `Error: ${error.message}`;
       throw error;
     }
-    if (!((await vault.isFile(resolved)) || (await vault.isFolder(resolved)))) {
-      return notFound("note", path, await suggestNotes(vault, path, scope));
+    if (!(await vault.isFile(resolved))) {
+      // A wrong folder or a bare name finds the one note of that name, as get_metadata does (#159)
+      const found = await resolveExistingNote(vault, path, scope);
+      if (!found.note) return found.error;
+      resolved = found.note;
     }
     const key = args.str("key");
+    // An unquoted null removes the property (#161); quoted, "null" is the text
+    // Changes go to the note as it is when written, so the user's typing meanwhile is kept (#164)
+    if (args.str("value").trim() === "null") {
+      if (!(key in readFrontmatter(await vault.read(resolved)).data)) {
+        return `'${key}' is not set in '${resolved}'; nothing to remove`;
+      }
+      await modifyFile(vault, resolved, (text) => setFrontmatter(text, { [key]: undefined }));
+      return `Removed ${key} from '${resolved}'`;
+    }
     const stored = parseValue(args.str("value"));
-    await vault.write(resolved, setFrontmatter(await vault.read(resolved), { [key]: stored }));
-    return `Set ${key} to ${shown(stored)} in '${path}'`;
+    await modifyFile(vault, resolved, (text) => setFrontmatter(text, { [key]: stored }));
+    return `Set ${key} to ${shown(stored)} in '${resolved}'`;
   });
 
   return [getMetadata, updateMetadata];

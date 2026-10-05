@@ -10,6 +10,8 @@
  * it `2026-09-23-1432-move-ideas` matches nothing, and the picker sits blank on the conversation you are in.
  */
 
+import { fold } from "../core/paths";
+
 const MAX_WORDS = 6;
 const MAX_SLUG = 48;
 
@@ -28,10 +30,12 @@ function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
 
-/** The first few words, as a file name can hold them. Anything else — punctuation, CJK, emoji — is dropped. */
+/**
+ * The first few words, as a file name can hold them. Letters are folded to their base form first, so "Grüße" is
+ * "grusse", not "gr-e" (#164); anything else — punctuation, CJK, emoji — is dropped.
+ */
 function slugify(prompt: string): string {
-  const words = prompt
-    .toLowerCase()
+  const words = fold(prompt)
     .split(/[^a-z0-9]+/)
     .filter(Boolean)
     .slice(0, MAX_WORDS);

@@ -5,11 +5,12 @@
  * into innerHTML — a reply is untrusted text that happens to arrive from a program you started.
  */
 
-import { type Editor, ItemView, MarkdownRenderer, MarkdownView, Notice, Scope, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import type { EditorView } from "@codemirror/view";
+import { type Editor, ItemView, MarkdownRenderer, MarkdownView, Menu, Notice, Scope, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 
 import type { AgentSummary, ProfileSummary, ToolCall, TurnChanges }
   from "../api/types";
-import type { SessionSummary } from "../core/sessions";
+import type { SavedCall, SessionSummary } from "../core/sessions";
 import { buildContext, type NoteContext } from "../commands/context";
 import { messageOf } from "../core/errors";
 import type { InProcessAgent } from "../inprocess/InProcessAgent";
@@ -18,11 +19,15 @@ import { serverLabel, type LocalServer } from "../settings/connections";
 import { ConfirmModal } from "./ConfirmModal";
 import { AskModal } from "./AskModal";
 import { UndoModal } from "./UndoModal";
+import { showKeptSelection } from "./keptSelection";
 import type { ContextUsage } from "./contextMeter";
 import { sessionNameFor } from "./sessionName";
 import { ACCEPT, attachmentPrompt, checkAttachment, formatSize } from "./attachments";
 import { coalesce } from "./coalesce";
 import { asStreaming } from "./streamingMarkdown";
+import { RenameModal } from "./RenameModal";
+import { readableName, sessionLabels } from "./sessionLabels";
+import { callArguments, callLine } from "./toolCallText";
 import { isRemote, withoutRemoteMedia } from "./safeMarkdown";
 
 export const CHAT_VIEW_TYPE = "obsidian-agent-chat";
@@ -44,6 +49,14 @@ interface ViewDeps {
   setup: SetupHost;
   /** Show how full the context window is in Obsidian's status bar; null hides it (#151). */
   context(usage: ContextUsage | null): void;
+  /** This view was focused or sent something: commands and the context meter follow it (#153). */
+  used(view: ChatView): void;
+  /** Whether this is the chat used last, whose context the status bar shows. */
+  current(view: ChatView): boolean;
+  /** Whether conversation *name* is open in another chat view; *reveal* switches to that view (#153). */
+  openElsewhere(name: string, view: ChatView, reveal: boolean): boolean;
+  /** The conversations changed in *view* — an answer, a new title: the other chat views list them again (#286). */
+  sessionsChanged(view: ChatView): void;
 }
 
 export interface SetupHost {
@@ -55,6 +68,9 @@ export interface SetupHost {
   addLocal(server: LocalServer): Promise<string | null>;
   openSettings(): void;
 }
+
+/** The picker's entry for an open conversation that is not kept (#286): not a name a note can have. */
+const UNKEPT = "\u0000unkept";
 
 export class ChatView extends ItemView {
   private messages!: HTMLElement;
@@ -68,7 +84,9 @@ export class ChatView extends ItemView {
   private agentPicker!: HTMLSelectElement;
   private profilePicker!: HTMLSelectElement;
   private sessionPicker!: HTMLSelectElement;
-  private deleteButton!: HTMLButtonElement;
+  private menuButton!: HTMLButtonElement;
+  /** The titles the conversations in the picker were given, by name (#286). */
+  private titles = new Map<string, string>();
   private keepBox!: HTMLInputElement;
   private sessionName = "";
   // What this conversation was first asked, so the box can name it after the fact
@@ -80,6 +98,12 @@ export class ChatView extends ItemView {
   private lastNote: MarkdownView | null = null;
   // Shown while no connection is set up (#110), in place of a first message that could only fail
   private setupCard: HTMLElement | null = null;
+  // Above the input: the note and selection a typed message takes along (#218)
+  private contextLine: HTMLElement | null = null;
+  /** This view's own, for its conversation while it is not kept: two chats never share one (#153). */
+  readonly viewId = crypto.randomUUID();
+  // How full the window was after this view's last answer, shown again when the view is focused (#153)
+  private usage: ContextUsage | null = null;
 
   constructor(leaf: WorkspaceLeaf, private readonly deps: ViewDeps) {
     super(leaf);
@@ -104,24 +128,23 @@ export class ChatView extends ItemView {
     this.lastNote = this.app.workspace.getActiveViewOfType(MarkdownView);
     this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
       if (leaf?.view instanceof MarkdownView) this.lastNote = leaf.view;
+      // Back in this chat: list the conversations again, as notes in .sessions/ may have been removed or added
+      // outside it — in the file explorer, or by sync (2026-10-05). Not while an answer is coming in
+      if (leaf === this.leaf && !this.turnId) void this.refreshSessions();
     }));
 
+    // The conversation first, then who answers it, then what happens to it (#286); a new conversation is the
+    // picker's first entry, so there is no + button. Named for screen readers, as the icon button is (#173)
     const bar = root.createDiv({ cls: "obsidian-agent-bar" });
-    // Named for screen readers, as the icon buttons beside them are (#173)
+    this.sessionPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-sessions",
+                                                  attr: { "aria-label": "Conversation" } });
+    this.sessionPicker.onchange = () => {
+      if (this.sessionPicker.value !== UNKEPT) void this.openSession(this.sessionPicker.value);
+    };
     this.agentPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-picker", attr: { "aria-label": "Agent" } });
     this.profilePicker = bar.createEl("select", { cls: "dropdown obsidian-agent-profiles",
                                                   attr: { "aria-label": "Connection" } });
     this.profilePicker.onchange = () => this.deps.rememberProfile(this.profilePicker.value);
-    this.sessionPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-sessions",
-                                                  attr: { "aria-label": "Conversation" } });
-    this.sessionPicker.onchange = () => void this.openSession(this.sessionPicker.value);
-    const newChat = bar.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "New conversation" } });
-    setIcon(newChat, "plus");
-    newChat.onclick = () => void this.newConversation();
-    this.deleteButton = bar.createEl("button", { cls: "clickable-icon",
-                                                 attr: { "aria-label": "Delete this conversation" } });
-    setIcon(this.deleteButton, "trash-2");
-    this.deleteButton.onclick = () => this.askToDelete();
 
     const keep = bar.createEl("label", { cls: "obsidian-agent-keep" });
     this.keepBox = keep.createEl("input", { type: "checkbox" });
@@ -129,11 +152,27 @@ export class ChatView extends ItemView {
     keep.createSpan({ text: "Keep" });
     keep.title = "Write this conversation to a note in the vault";
     this.keepBox.onchange = () => this.keepChanged();
+    // Rename and Delete in one menu (#286): the header has no room for an icon each
+    this.menuButton = bar.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Conversation actions" } });
+    setIcon(this.menuButton, "more-horizontal");
+    this.menuButton.onclick = (event) => this.conversationMenu(event);
 
     this.messages = root.createDiv({ cls: "obsidian-agent-messages" });
+    // Obsidian shows no menu of its own on selected text in a view: offer Copy, as an editor would (#217)
+    this.registerDomEvent(this.messages, "contextmenu", (event) => {
+      const selected = this.messages.ownerDocument.getSelection();
+      const text = selected && !selected.isCollapsed && this.messages.contains(selected.anchorNode) ? selected.toString() : "";
+      if (!text.trim()) return;
+      event.preventDefault();
+      new Menu().addItem((item) => item.setTitle("Copy").setIcon("copy").onClick(() => {
+        void navigator.clipboard.writeText(text).then(() => new Notice("Copied"));
+      })).showAtMouseEvent(event);
+    });
 
     // Files added to the next message: by "+", or dropped anywhere on the chat (#190)
     this.chips = root.createDiv({ cls: "obsidian-agent-attachments is-hidden" });
+    // What a typed message takes along: the note, and its selection (#218)
+    this.contextLine = root.createDiv({ cls: "obsidian-agent-context-line is-hidden" });
     const composer = root.createDiv({ cls: "obsidian-agent-composer" });
     this.input = composer.createEl("textarea", {
       cls: "obsidian-agent-input",
@@ -183,12 +222,19 @@ export class ChatView extends ItemView {
       return false;
     });
 
+    // Commands and the context meter go to the chat used last (#153)
+    this.registerDomEvent(this.containerEl, "focusin", () => {
+      this.deps.used(this);
+      this.keepNoteSelection();
+    });
+
     await this.refreshAgents();
     this.refreshProfiles();
     await this.refreshSessions();
+    // A second chat window starts a conversation of its own rather than loading the first one's twice (#153)
     const last = this.deps.lastSession();
     if (!this.deps.setup.ready()) this.showSetup();
-    else if (last) await this.openSession(last);
+    else if (last && !this.deps.openElsewhere(last, this, false)) await this.openSession(last);
     else this.say("system", "Ready.", false);
   }
 
@@ -196,6 +242,16 @@ export class ChatView extends ItemView {
     this.cancel();
     this.showContext(null);
     this.contentEl.empty();
+  }
+
+  /** The conversation open here: its session name, or "" while it is not kept. */
+  session(): string {
+    return this.sessionName;
+  }
+
+  /** How full the context window was after this view's last answer; null before one. */
+  contextUsage(): ContextUsage | null {
+    return this.usage;
   }
 
   /** The agents and connections to offer (#86). */
@@ -295,11 +351,13 @@ export class ChatView extends ItemView {
     }
     this.sessionPicker.empty();
     this.sessionPicker.createEl("option", { text: "New conversation", value: "" });
+    // Titles, or names made readable; the option's value stays the name, which identifies the note (#286)
+    this.titles = new Map(sessions.filter((s) => s.title).map((s) => [s.name, s.title!]));
+    const labels = sessionLabels(sessions);
     for (const session of sessions) {
-      const label = session.exchanges ? `${session.name} (${session.exchanges})` : session.name;
-      this.sessionPicker.createEl("option", { text: label, value: session.name });
+      this.sessionPicker.createEl("option", { text: labels.get(session.name) ?? session.name, value: session.name });
     }
-    this.sessionPicker.value = this.sessionName;
+    this.showInPicker();
   }
 
   /** The box: start keeping the open conversation, or stop. Both take effect now, not on the next turn. */
@@ -309,15 +367,72 @@ export class ChatView extends ItemView {
     const client = this.deps.agent();
     if (keep && !this.sessionName) {
       const name = sessionNameFor(this.firstPrompt || "conversation");
-      client.nameSession("", name);
+      client.nameSession("", name, this.viewId);
       this.setSession(name);
       new Notice(`Keeping this conversation as "${name}".`);
       window.setTimeout(() => void this.refreshSessions(), 300);
     } else if (!keep && this.sessionName) {
-      client.nameSession(this.sessionName, "");
+      client.nameSession(this.sessionName, "", this.viewId);
       new Notice(`No longer adding to "${this.sessionName}". The note so far is still there.`);
       this.setSession("");
     }
+  }
+
+  /** The header's ⋯ menu: rename the conversation, or delete it once it is kept (#286). */
+  private conversationMenu(event: MouseEvent): void {
+    const menu = new Menu();
+    menu.addItem((item) => item.setTitle("Rename conversation…").setIcon("pencil")
+      .onClick(() => this.renameConversation()));
+    menu.addItem((item) => {
+      item.setTitle("Delete conversation").setIcon("trash-2").setDisabled(!this.sessionName)
+        .onClick(() => this.askToDelete());
+      (item as unknown as { setWarning?(warning: boolean): unknown }).setWarning?.(true);
+    });
+    menu.showAtMouseEvent(event);
+  }
+
+  /**
+   * Ask for a new name and rename the open conversation (#286); one that is not kept is kept under it. Not while an
+   * answer is coming: its note is written when the answer ends, under the name it started with.
+   */
+  renameConversation(): void {
+    if (this.turnId) {
+      new Notice("Wait until the answer is done, then rename the conversation.");
+      return;
+    }
+    const current = this.titles.get(this.sessionName)
+      ?? (this.sessionName ? readableName(this.sessionName) : this.firstPrompt.trim().slice(0, 60));
+    new RenameModal(this.app, current, async (wanted) => {
+      const title = wanted.trim();
+      const agent = this.deps.agent();
+      let name = this.sessionName;
+      try {
+        if (!name) {
+          // Not kept yet: kept now, under a name of its own as Keep would give it, and called what was typed
+          name = sessionNameFor(this.firstPrompt || title || "conversation");
+          agent.nameSession("", name, this.viewId);
+          this.keepBox.checked = true;
+          this.setSession(name);
+        }
+        await agent.titleSession(name, title);
+      } catch (error) {
+        return messageOf(error);
+      }
+      this.deps.sessionsChanged(this);
+      await this.refreshSessions();
+      new Notice(title ? `Renamed to "${title}".` : `"${readableName(name)}" has no title now.`);
+      return null;
+    }).open();
+  }
+
+  /** The conversations changed in another chat view: list them again (#286). */
+  async followRename(): Promise<void> {
+    await this.refreshSessions();
+  }
+
+  /** How a conversation is called here: its title, or its name made readable (#286). */
+  private labelOf(name: string): string {
+    return this.titles.get(name) ?? readableName(name);
   }
 
   /** Delete the open conversation's note. Asks first: there is no undo, and the journal does not cover it. */
@@ -329,7 +444,7 @@ export class ChatView extends ItemView {
     }
     new AskModal(this.app, {
       title: "Delete this conversation?",
-      body: `"${name}" and everything said in it go for good. Notes the agent changed are not touched.`,
+      body: `"${this.labelOf(name)}" and everything said in it go for good. Notes the agent changed are not touched.`,
       confirm: "Delete",
     }, (yes) => {
       if (yes) void this.deleteSession(name);
@@ -352,7 +467,7 @@ export class ChatView extends ItemView {
   async newConversation(): Promise<void> {
     this.cancel();
     this.firstPrompt = "";
-    this.deps.agent().forget();
+    this.deps.agent().forget(this.viewId);
     this.keepBox.checked = this.deps.keepByDefault();
     this.setSession("");
     this.messages.empty();
@@ -366,6 +481,11 @@ export class ChatView extends ItemView {
       await this.newConversation();
       return;
     }
+    // Open in another chat already: go there, rather than hold one conversation in two places (#153)
+    if (this.deps.openElsewhere(name, this, true)) {
+      this.showInPicker();
+      return;
+    }
     this.cancel();
     this.firstPrompt = "";
     this.keepBox.checked = true; // it is a note already; the box shows the truth about this conversation
@@ -376,9 +496,18 @@ export class ChatView extends ItemView {
       const answer = await this.deps.agent().session(name);
       // Without a count: the note records only the last summary's, and an earlier one may be folded into it
       if (answer.summary) await this.addSummaryDivider(0, answer.summary.text);
-      for (const message of answer.messages) await this.replay(message.role, message.content);
+      for (const message of answer.messages) await this.replay(message.role, message.content, message.calls);
       this.say("system", this.continueOnRecordedConnection(name, answer), false);
     } catch (error) {
+      // Its note is gone — removed outside the chat (2026-10-05): list what is there now, start a new conversation,
+      // and say what happened, rather than sit on a name the list can no longer open
+      await this.refreshSessions();
+      if (!Array.from(this.sessionPicker.options).some((option) => option.value === name)) {
+        await this.newConversation();
+        this.say("system", `"${readableName(name)}" is no longer in the vault: its note in .sessions/ was removed `
+                 + "outside the chat. The list of conversations is up to date again.", false);
+        return;
+      }
       this.say("system", `That conversation could not be read: ${messageOf(error)}`, false);
     }
     this.scrollDown();
@@ -394,25 +523,41 @@ export class ChatView extends ItemView {
   private continueOnRecordedConnection(name: string,
                                        answer: { connection?: string; model?: string; connection_exists?: boolean }): string {
     const recorded = answer.connection ?? "";
-    if (!recorded) return `Continuing "${name}".`;
+    if (!recorded) return `Continuing "${this.labelOf(name)}".`;
     const offered = Array.from(this.profilePicker.options).some((option) => option.value === recorded);
     if (!answer.connection_exists || !offered) {
-      return `Continuing "${name}". It was answered with "${recorded}", which is no longer configured; `
+      return `Continuing "${this.labelOf(name)}". It was answered with "${recorded}", which is no longer configured; `
              + "choose a connection in the header.";
     }
     this.profilePicker.value = recorded;
     this.deps.rememberProfile(recorded);
     const model = answer.model ? ` (${answer.model})` : "";
-    return `Continuing "${name}" on ${recorded}${model}, as before.`;
+    return `Continuing "${this.labelOf(name)}" on ${recorded}${model}, as before.`;
   }
 
-  /** One message from a session note. Tool calls and thinking are not in the note; the text is. */
-  private async replay(role: string, content: string): Promise<void> {
+  /**
+   * One message from a session note: its text, and an answer's tool calls when the note kept them (#282), folded
+   * as they were while it ran. Thinking is never in the note.
+   */
+  private async replay(role: string, content: string, calls?: SavedCall[]): Promise<void> {
     if (role === "user") {
       await this.say("user", content, true);
       return;
     }
     const turn = this.messages.createDiv({ cls: "obsidian-agent-message mod-agent" });
+    if (calls?.length) {
+      const tools = turn.createDiv({ cls: "obsidian-agent-tools" });
+      for (const call of calls) {
+        let input: Record<string, unknown> = {};
+        try {
+          input = JSON.parse(call.args) as Record<string, unknown>;
+        } catch {
+          // Cut short in the note: the row goes without its argument
+        }
+        const row = this.addToolRow(tools, { callId: "", name: call.name, input });
+        this.completeToolRow(row, call.result, call.error);
+      }
+    }
     await this.renderMarkdown(content, turn.createDiv({ cls: "obsidian-agent-body" }));
   }
 
@@ -423,9 +568,24 @@ export class ChatView extends ItemView {
     // A conversation is named before its note exists, so the entry has to be added now. Setting `value` to an
     // option the list does not have selects nothing, and the picker sits blank on the conversation you are in.
     const known = Array.from(this.sessionPicker.options).some((option) => option.value === name);
-    if (name && !known) this.sessionPicker.createEl("option", { text: name, value: name });
-    this.sessionPicker.value = name;
-    this.deleteButton?.toggleClass("is-disabled", !name);
+    if (name && !known) this.sessionPicker.createEl("option", { text: this.labelOf(name), value: name });
+    this.showInPicker();
+  }
+
+  /**
+   * Select the open conversation in the picker. One that is not kept but has messages gets an entry of its own,
+   * so that choosing "New conversation" is a change the picker reports (there is no + button, #286).
+   */
+  private showInPicker(): void {
+    const unkept = !this.sessionName && Boolean(this.firstPrompt);
+    let entry = Array.from(this.sessionPicker.options).find((option) => option.value === UNKEPT) ?? null;
+    if (unkept && !entry) {
+      entry = createEl("option", { text: "This conversation (not kept)", value: UNKEPT });
+      this.sessionPicker.options[0]?.after(entry);
+    } else if (!unkept && entry) {
+      entry.remove();
+    }
+    this.sessionPicker.value = this.sessionName || (unkept ? UNKEPT : "");
   }
 
   /**
@@ -461,6 +621,7 @@ export class ChatView extends ItemView {
     if (!this.firstPrompt) this.firstPrompt = prompt;
     const isNewSession = this.keepBox.checked && !this.sessionName;
     if (isNewSession) this.setSession(sessionNameFor(typed || this.firstFileName(saved)));
+    else this.showInPicker();
     await this.say("user", prompt, true);
 
     const turn = this.messages.createDiv({ cls: "obsidian-agent-message mod-agent" });
@@ -481,7 +642,9 @@ export class ChatView extends ItemView {
 
     const rows = new Map<string, HTMLElement>();
     const runner = this.deps.agent();
+    this.deps.used(this);
     this.turnId = runner.send(prompt, { agent: this.agentPicker.value, session: this.sessionName || undefined,
+                                        view: this.viewId,
                                         profile: this.profilePicker.value || undefined,
                                         context: request ? request.context : this.activeNoteContext() }, {
       onToken: (text) => {
@@ -517,7 +680,12 @@ export class ChatView extends ItemView {
         // A cancelled turn still gets its footer when it wrote something: stopping it is often why you want it back.
         if (!cancelled || changed) this.addFooter(turn, body, usage, changed);
         this.finishTurn();
-        if (isNewSession) void this.refreshSessions(); // it has a note now, so the picker should list it
+        // The note was just written: the picker lists conversations by their last change, newest first, so this
+        // one moves to the top, here and in the other chats (2026-10-05)
+        if (this.sessionName) {
+          void this.refreshSessions();
+          this.deps.sessionsChanged(this);
+        }
       },
       onError: (message) => {
         turn.createDiv({ cls: "obsidian-agent-error", text: message });
@@ -528,7 +696,9 @@ export class ChatView extends ItemView {
 
   /** The context meter in the status bar: tokens in use of the window, hidden before the first answer (#151). */
   private showContext(usage: ContextUsage | null): void {
-    this.deps.context(usage);
+    this.usage = usage;
+    // The status bar has one meter: it shows the chat used last, not whichever answered last (#153)
+    if (this.deps.current(this)) this.deps.context(usage);
   }
 
   /**
@@ -556,9 +726,13 @@ export class ChatView extends ItemView {
     const row = container.createEl("details", { cls: "obsidian-agent-tool" });
     const summary = row.createEl("summary");
     summary.createSpan({ cls: "obsidian-agent-tool-name", text: displayName(call.name) });
-    const argument = identifyingArgument(call.input);
-    if (argument) summary.createSpan({ cls: "obsidian-agent-tool-arg", text: argument });
+    // Every argument on the line, the main one first; the full set when the row is unfolded (2026-10-05)
+    const line = callLine(call.input);
+    const argument = summary.createSpan({ cls: "obsidian-agent-tool-arg", text: line });
+    if (line) argument.setAttr("title", line);
     summary.createSpan({ cls: "obsidian-agent-tool-state", text: "…" });
+    const all = callArguments(call.input);
+    if (all) row.createEl("pre", { cls: "obsidian-agent-tool-args", text: all });
     row.createEl("pre", { cls: "obsidian-agent-tool-result" });
     return row;
   }
@@ -568,7 +742,7 @@ export class ChatView extends ItemView {
     const state = row.querySelector(".obsidian-agent-tool-state");
     if (state) state.textContent = isError ? "failed" : "done";
     row.toggleClass("mod-error", isError);
-    const pre = row.querySelector("pre");
+    const pre = row.querySelector(".obsidian-agent-tool-result");
     if (pre) pre.textContent = result.length > 2000 ? `${result.slice(0, 2000)}…` : result;
     if (isError) row.setAttr("open", "true");
   }
@@ -778,19 +952,32 @@ export class ChatView extends ItemView {
     return buildContext(this.activeNotePath(), selection, true).context;
   }
 
+  /**
+   * The chat has the focus: keep the note's selection visible there, and say above the input what a typed message
+   * takes along (#218). The editor's CodeMirror view is `editor.cm`, not in the published API: without it the line
+   * still says what goes along.
+   */
+  private keepNoteSelection(): void {
+    const editor = this.noteEditor();
+    const view = (editor as unknown as { cm?: EditorView } | undefined)?.cm;
+    if (view && editor?.somethingSelected()) showKeptSelection(view);
+    this.showContextLine();
+  }
+
+  private showContextLine(): void {
+    if (!this.contextLine) return;
+    const context = this.activeNoteContext();
+    const note = context?.active_note ? context.active_note.split("/").pop()!.replace(/\.md$/, "") : "";
+    const selection = (context?.selection ?? "").replace(/\s+/g, " ").trim();
+    const text = selection ? `Selection in "${note}": "${selection.length > 60 ? `${selection.slice(0, 60)}…` : selection}"`
+      : note ? `Note: "${note}"` : "";
+    this.contextLine.setText(text);
+    this.contextLine.toggleClass("is-hidden", !text);
+  }
+
   private scrollDown(): void {
     this.messages.scrollTop = this.messages.scrollHeight;
   }
-}
-
-/** The one argument that says what a call is about — a path, a query — for the collapsed row. */
-export function identifyingArgument(input: unknown): string {
-  const values = (input ?? {}) as Record<string, unknown>;
-  for (const key of ["path", "from_path", "query", "pattern", "template", "task", "title"]) {
-    const value = values[key];
-    if (typeof value === "string" && value) return value.length > 60 ? `${value.slice(0, 60)}…` : value;
-  }
-  return "";
 }
 
 /** The next animation frame: renders of a streamed answer wait for it, so the view repaints between them. */

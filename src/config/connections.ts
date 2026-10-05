@@ -22,7 +22,8 @@ export interface Connection {
   baseUrl: string;
   model: string;
   apiKey?: string;
-  temperature: number;
+  /** Unset for a connection with a reasoning effort and no temperature of its own: reasoning models refuse one. */
+  temperature?: number;
   topP?: number;
   topK?: number;
   minP?: number;
@@ -31,6 +32,14 @@ export interface Connection {
   maxTokens?: number;
   enableThinking?: boolean;
   contextWindow: number;
+  /** OpenAI's processing tier (`service_tier`): sent only when set. */
+  serviceTier?: string;
+  /** A flex request OpenAI refuses for capacity is sent again with tier auto (`service_tier_fallback`, on). */
+  serviceTierFallback: boolean;
+  /** How much a reasoning model thinks (`reasoning_effort`): sent only when set. */
+  reasoningEffort?: string;
+  /** The wire format: OpenAI's Responses API, or chat completions, which every other server speaks (#295). */
+  api: "responses" | "chat_completions";
 }
 
 /** Named sets of sampling values — `SAMPLING_PRESETS`. A preset fills only what is not set explicitly. */
@@ -150,13 +159,29 @@ export function resolveConnection(values: Values, profile: string, env: (name: s
     name, provider, baseUrl,
     model: typeof raw.model === "string" && raw.model ? raw.model : "",  // no model name is assumed; a turn asks for one (#110)
     apiKey: key || undefined,
-    temperature: number("temperature") ?? 0.7,
+    // A reasoning model (one given a reasoning effort) refuses a temperature but its own: none is assumed for it,
+    // only one set on the connection or the agent is sent
+    temperature: number("temperature") ?? (typeof raw.reasoning_effort === "string" && raw.reasoning_effort ? undefined : 0.7),
     topP: number("top_p"), topK: number("top_k"), minP: number("min_p"),
     presencePenalty: number("presence_penalty"), repetitionPenalty: number("repetition_penalty"),
     maxTokens: number("max_tokens"),
     enableThinking: typeof raw.enable_thinking === "boolean" ? raw.enable_thinking : undefined,
     contextWindow: number("context_window") ?? 128_000,
+    serviceTier: typeof raw.service_tier === "string" && raw.service_tier ? raw.service_tier : undefined,
+    serviceTierFallback: raw.service_tier_fallback !== false,
+    reasoningEffort: typeof raw.reasoning_effort === "string" && raw.reasoning_effort ? raw.reasoning_effort : undefined,
+    api: wireFormat(raw.api, baseUrl),
   };
+}
+
+/** The `api` setting as the format to speak: *auto* is the Responses API for OpenAI's own address only (#295). */
+export function wireFormat(setting: unknown, baseUrl: string): "responses" | "chat_completions" {
+  if (setting === "responses" || setting === "chat_completions") return setting;
+  try {
+    return new URL(baseUrl).hostname === "api.openai.com" ? "responses" : "chat_completions";
+  } catch {
+    return "chat_completions";
+  }
 }
 
 /** What detectConnection learnt about each address, and when; asked again after a while (a model may be swapped). */

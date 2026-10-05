@@ -6,15 +6,39 @@ Everything the plugin does, in more detail than the [README](../README.md).
 
 Open the chat from the ribbon (the bot icon) or the command palette (**Hiro Agent: Open the chat**). Enter sends,
 Shift+Enter starts a line, Escape stops a running turn. A typed message tells the agent which note is open, and
-what is selected in it. A destructive tool — `update_note`, `delete_note`, `move_note` — opens a dialog naming
-the note it will touch; dismissing it means no.
+what is selected in it. The selection stays highlighted in the note while you type in the chat, and the line above
+the input says what goes along. A destructive tool — `update_note`, `delete_note`, `move_note` — opens a dialog naming
+the note it will touch; dismissing it means no. `move_note` and `delete_note` also move and delete attachments
+(images, PDFs, …), their embeds following a move; undo does not cover those, so move one back to undo a move, and
+restore a deleted one from the trash. Text in the chat can be selected and copied with Ctrl+C, or with **Copy** in
+the right-click menu; the copy button under an answer copies all of it.
 
-To give the agent something that is not in the vault yet — a photo, a scanned PDF, a voice memo, a short video —
+**Hiro Agent: New chat window** opens another chat beside the first, with a conversation of its own. The commands
+and the context meter in the status bar follow the chat you used last; picking a conversation that is open in
+another chat switches to that chat. Answers still come one at a time: a message sent in one chat while the other is
+answering waits for it.
+
+To give the agent something that is not in the vault yet — a photo, a scanned PDF, a voice memo, a short video, a
+Word, Excel or PowerPoint file —
 drop the files onto the chat, or press **+** above *Send*. They show above the input until you send, and you can
 take one out again with its ✕. Sending saves them in the vault, where Obsidian puts new attachments (Settings →
 Files and links → Default location for new attachments), and the message embeds them, so a kept conversation's
-note shows them too. The agent reads them with `read_attachment`: images as images, PDFs page by page, recordings
-and videos transcribed on your computer. Images may be up to 20 MB, PDFs 50 MB, recordings and videos 100 MB.
+note shows them too. The agent reads them with `read_attachment`: images as images, PDFs as their text (page by page as images when they are scans), recordings
+and videos transcribed on your computer, Word documents as text with their headings, lists and tables, Excel
+sheets as tables, PowerPoint slides with their notes, the same from LibreOffice's `.odt`, `.ods` and `.odp`, EPUB
+books chapter by chapter (first the list of chapters), canvases as their cards, groups and arrows, and text
+files (`.csv`, `.json`, `.txt`, …) as they are.
+Files already in the vault are found with `list_attachments`, which lists everything that is not a note with its
+type and size, by folder or by name ("the invoice in my Inbox"). `list_notes` says how many attachments a folder
+has, and `find_notes` names the attachments that match when no note does.
+The old `.doc`, `.xls` and `.ppt` formats can't be read: save them as `.docx`, `.xlsx` or `.pptx`. Images may be up
+to 20 MB, PDFs and documents 50 MB, recordings and videos 100 MB.
+
+The agent can run your **Bases** too, with `query_base`: a `.base` file, or a Base embedded in a note as a ```` ```base ````
+block. Obsidian computes the rows, with the Base's filters, formulas, sorting and grouping, and the agent gets them as
+a table. While it runs, a temporary Base opens in a background tab for a moment. A Base's view menu also offers
+"Hiro Agent (reads rows)": that view type is for the agent and shows nothing to read. An agent
+limited to some folders doesn't get `query_base`, since a Base can reach the whole vault.
 
 A turn that changed files gets an undo button in its footer. It shows the diff first and restores only files
 that still hold what the agent wrote, so anything you edited since is named and left alone. The journal holds
@@ -23,7 +47,11 @@ wrote, moved or deleted — including the links Obsidian rewrote on a move — b
 
 Conversations are kept. The first turn names one after what you asked (`2026-09-23 1432 move-ideas-to-archive`)
 and the plugin writes it to `<vault>/.sessions/`; the picker beside the agent picker reopens any of them, and
-the view comes back to whichever you had open. **A session note holds the whole conversation**, including the
+the view comes back to whichever you had open. The picker shows each conversation's title — what you called it — or
+else the start of its first message. The **⋯** button beside it renames the open conversation or deletes it, and
+*Hiro Agent: Rename conversation* renames it from the command palette. The title is kept as you type it, in the
+note's `title:`; the note keeps its file name, so links to it and its place in `.sessions/` do not change.
+Renaming a conversation that is not kept yet keeps it. **A session note holds the whole conversation**, including the
 content of notes the agent read, and it syncs wherever your vault syncs. Credentials that look like credentials
 — `sk-…`, `ghp_…`, `AKIA…`, a private key block, an `api_key: …` line — are replaced by a marker before the note
 is written, but that is a net and not a guarantee: anything without a recognisable shape goes through.
@@ -40,6 +68,12 @@ The **Keep** box decides whether a conversation is written to the vault at all. 
 no name, so the conversation is held in memory and nothing reaches a note. Tick it part-way through and
 what has already been said goes into the note too, rather than only what comes next; unticking stops the saving
 and leaves the note where it is.
+
+A kept conversation's note holds the questions and answers. To check later what the agent did, switch on **Save
+tool calls with conversations** (*Settings → Hiro Agent → Features*): each answer in the note then starts with its
+tool calls, folded, each with its arguments and the first 500 characters of its result, and a reopened
+conversation shows them in the chat again. The model never gets them back; what it remembers of a conversation is
+the same either way.
 
 The trash icon deletes the open conversation's note. It asks first, there is no undo, and notes the agent
 changed are not touched — only the transcript goes.
@@ -92,7 +126,7 @@ Every command starts with **Hiro Agent:** in the command palette.
 | **Hiro Agent: Ask *daily-note*…** (one per agent) | Asks that agent about the open note |
 | **Hiro Agent: Ask an agent…** | The same, choosing the agent from a list |
 | **Hiro Agent: Ask about the selection** | Asks the default agent about the selected text; also *Ask the agent about this* in the editor's right-click menu |
-| **Hiro Agent: Open the chat** · **Show the agent's log** | |
+| **Hiro Agent: Open the chat** · **New chat window** · **Show the agent's log** | |
 
 Each "Ask" command opens a box first: say what the agent should do, and untick *Include* to leave the note out.
 With text selected, the agent gets the selection and the note's name; otherwise just the note's name, which it
@@ -118,7 +152,8 @@ obsidian agent:ask prompt="Tidy the inbox" allow=destructive timeout=900 format=
 
 `agent:ask` runs one turn and prints the reply when it ends — nothing shows meanwhile. Each call is a new
 conversation, saved in `.sessions/` like a chat one (the chat's picker opens it); `session=<name>` continues one.
-`connection=` wins over the agent's own, as the chat header's picker does.
+`connection=` wins over the agent's own, as the chat header's picker does. `selection=<text>` sends text as if it were
+selected in that note, as the chat does.
 
 - **Ctrl+C does not stop the turn**: it ends the terminal, and the turn runs on inside Obsidian — a notice there
   says a turn from the terminal is running, and when it ends. `timeout=` (seconds, default 600) stops it; the
@@ -126,6 +161,8 @@ conversation, saved in `.sessions/` like a chat one (the chat's picker opens it)
 - **Deleting, moving or overwriting a note is refused** unless the call says `allow=destructive`; then the usual
   dialog asks in the Obsidian window while the terminal waits. With Settings → Hiro Agent → Advanced → *Developer* on,
   `allow=destructive` runs them without asking — for unattended runs such as the benchmark.
+- **Keep the Obsidian window open, not minimized**: while it is minimized, Obsidian does not finish moving a note
+  and updating the links to it, so `move_note` refuses and says so.
 
 The CLI always exits 0; an error is a line starting with `Error:`, and `format=json` answers `"ok": false` with the
 error. `obsidian help agent:ask` lists every flag.
@@ -173,8 +210,17 @@ Four tabs, in the order setting up meets them:
   refused key shows here, and lists the server's models as suggestions — and *Save*. There is no kind to pick: every
   server speaks the same API, and the plugin finds out from the address whether llama.cpp, Ollama, LM Studio or vLLM
   answers there, which tells it the loaded model and the context window. The row names what it found. An address
-  without a path (`http://127.0.0.1:11434`) gets `/v1` added. Sampling, context window and output
-  length are folded under *More for …* on each row. A server answering on this computer's usual ports — llama.cpp
+  without a path (`http://127.0.0.1:11434`) gets `/v1` added. Sampling, context window, output
+  length, reasoning effort and service tier are folded under *More for …* on each row. *Reasoning effort* tells
+  an OpenAI reasoning model how much to think — less is faster and cheaper; left empty, nothing is sent. For a
+  llama.cpp model, *Enable thinking* does that instead. *Service tier* is OpenAI's: **flex** costs
+  about half and answers more slowly, **priority** answers faster at a higher price; left empty, nothing is sent.
+  When OpenAI has no flex capacity it refuses the request, and *Service tier fallback* (on) sends it once more at
+  tier *auto*, at the normal price; switched off, the answer fails instead. *API* says how the plugin talks to
+  the model: OpenAI's current reasoning models take tools only through OpenAI's **Responses** API, which *auto*
+  uses for `api.openai.com`; every other address gets **chat completions**, which local servers and most other
+  providers speak. Through the Responses API nothing is stored at OpenAI: the model's encrypted reasoning goes back
+  with each tool result, and the thinking shown is OpenAI's summary of it. A server answering on this computer's usual ports — llama.cpp
   8080 and 8090, vLLM 8000, LM Studio 1234, Ollama 11434 — is offered with one click. A connection whose key and address came from another device says so, and *Approve*
   asks in a dialog where the key would go.
 - **Features** — switches for web pages, undo, memory and audio transcription; each one's own settings are folded
