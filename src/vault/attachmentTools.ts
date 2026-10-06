@@ -132,7 +132,7 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
       for (const number of chosen) {
         const page = await document.getPage(number);
         const viewport = page.getViewport({ scale: RENDER_DPI / 72 });
-        const canvas = window.document.createElement("canvas");
+        const canvas = createEl("canvas");
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
         await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;

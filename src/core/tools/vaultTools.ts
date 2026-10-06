@@ -34,6 +34,8 @@ export function makeVaultTools(vault: VaultPort, scope: string[] | null = null):
     if (error instanceof PathError) return `Error: ${error.message}`;
     throw error;
   };
+  // New notes create_note held back for a similar name, this answer (#269): the toolset is made per answer
+  const heldBack = new Set<string>();
 
   const readNote = defineTool("read_note", async (args) => {
     // A canvas is not a note: say which tool reads it, rather than that no note of that name exists (#214)
@@ -109,19 +111,26 @@ export function makeVaultTools(vault: VaultPort, scope: string[] | null = null):
       return `Error: note already exists at '${path}'`;
     }
     // Frontmatter that does not parse shows no properties in Obsidian: refused, so the model can fix it (#252)
-    const before = (await vault.isFile(resolved)) ? await vault.read(resolved) : "";
+    const exists = await vault.isFile(resolved);
+    const before = exists ? await vault.read(resolved) : "";
     const broken = brokenByWrite(before, args.str("content"));
     if (broken) return broken;
+    // "Thomas Becker" next to People/Tom Becker.md: asked about before the note exists, as a hint after it came too
+    // late — the model passed it on instead of using the other note (#265, #269). Two people may share a surname:
+    // the same call again creates it
+    if (!exists && !heldBack.has(resolved)) {
+      const folder = resolved.includes("/") ? resolved.slice(0, resolved.lastIndexOf("/")) : "";
+      const siblings = (await vaultNotes(vault, scope)).filter((rel) => rel !== resolved
+        && (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") === folder);
+      const similar = similarNames(stem(resolved), siblings);
+      if (similar.length) {
+        heldBack.add(resolved);
+        return `Not created yet: ${similar.join(", ")} ${similar.length > 1 ? "have" : "has"} a similar name. If it is `
+          + "the same person or thing, use that note; if not, call create_note again with the same path.";
+      }
+    }
     await vault.write(resolved, args.str("content"));
-    // "Thomas Becker" next to People/Tom Becker.md: a hint, not a refusal, as two people may share a surname (#265)
-    const folder = resolved.includes("/") ? resolved.slice(0, resolved.lastIndexOf("/")) : "";
-    const siblings = (await vaultNotes(vault, scope)).filter((rel) => rel !== resolved
-      && (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") === folder);
-    const similar = similarNames(stem(resolved), siblings);
-    return `Created note at '${path}'` + (similar.length
-      ? `\n[${similar.join(", ")} ${similar.length > 1 ? "have" : "has"} a similar name; if it is the same person or `
-        + "thing, use that note instead.]"
-      : "");
+    return `Created note at '${path}'`;
   }, {
     // Replacing a note that exists is overwriting it: asked about like update_note (#157). A new note is not
     destructiveWhen: async (args) => {
@@ -416,9 +425,12 @@ export function similarNames(name: string, siblings: string[]): string[] {
   const words = (text: string): string[] => fold(text).split(/[\s._-]+/).filter(Boolean);
   const mine = words(name);
   return siblings.filter((rel) => {
+    // A name with a number in it is a dated or numbered note, not a person or a thing: "2026-09-16 Website Relaunch
+    // Review" is not "2026-08-21 Analytics Roadmap Review", though both end in "Review" and start with a 2 (2026-10-06)
+    if (/\d/.test(name + stem(rel))) return false;
     const theirs = words(stem(rel));
     if (mine.length > 1 && theirs.length > 1 && mine.at(-1) === theirs.at(-1) && mine[0][0] === theirs[0][0]) return true;
-    return !/\d/.test(name + stem(rel)) && ratio(fold(name), fold(stem(rel))) >= 0.85;
+    return ratio(fold(name), fold(stem(rel))) >= 0.85;
   }).slice(0, 2);
 }
 

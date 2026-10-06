@@ -146,7 +146,7 @@ export function resolveConnection(values: Values, profile: string, env: (name: s
   if (preset) for (const [key, value] of Object.entries(preset)) if (raw[key] === undefined || raw[key] === null) raw[key] = value;
 
   const provider = String(raw.provider ?? "openai");
-  const number = (key: string): number | undefined => (typeof raw[key] === "number" ? raw[key] as number : undefined);
+  const number = (key: string): number | undefined => (typeof raw[key] === "number" ? raw[key] : undefined);
   // Only a `${VAR}` reference is a key: it is read from the keychain. A key written out is never used, and there
   // is no fallback to the environment (Python's OpenAI client read OPENAI_API_KEY on its own; the plugin does not)
   const reference = typeof raw.api_key === "string" ? /^\$\{([^}]+)\}$/.exec(raw.api_key.trim()) : null;

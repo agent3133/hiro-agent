@@ -12,7 +12,7 @@
 import { readFrontmatter, setFrontmatter } from "../frontmatter";
 import { checkNoteName, noteFile, PathError, safeResolve } from "../paths";
 import { pyJson, pyRepr } from "../python";
-import { modifyFile, resolveExistingNote, type VaultPort } from "../vault";
+import { modifyFile, resolveExistingNote, vaultNotes, type VaultPort } from "../vault";
 import { defineTool, type Tool } from "./tool";
 
 type Value = string | number | boolean | Value[] | { [key: string]: Value };
@@ -77,6 +77,67 @@ export function parseValue(value: string): Value {
   return value;
 }
 
+/** How a value is written, as words: "a [[link]]", "a list of [[links]]", "a date like 2026-09-14", "text" (#264). */
+export function writtenAs(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "boolean") return "a checkbox";
+  if (typeof value === "number") return "a number";
+  if (value instanceof Date) return "a date like 2026-09-14";
+  if (Array.isArray(value)) {
+    const items = value.map(writtenAs).filter(Boolean);
+    if (!items.length) return "";
+    if (items.every((item) => item === "a [[link]]")) return "a list of [[links]]";
+    return "a list";
+  }
+  if (typeof value === "object") return "a mapping";
+  const text = String(value).trim();
+  if (/^\[\[[^\]]+\]\]$/.test(text)) return "a [[link]]";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return "a date like 2026-09-14";
+  if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text)) return "a date and time like 2026-09-14T10:00";
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(text)) return "a date like 14.09.2026";
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) return "a date like 09/14/2026";
+  return "text";
+}
+
+/** Notes in a folder read for how they write a property (#264): enough to see a habit, few enough to stay quick. */
+const SIBLINGS_READ = 50;
+
+/**
+ * A line for update_metadata's answer when *value* is written unlike *key* in most other notes of the note's folder
+ * (#264): a path where the others link, text where they list. Only a hint — a different form may be meant.
+ */
+export async function formHint(vault: VaultPort, scope: string[] | null, note: string, key: string,
+                               value: unknown): Promise<string> {
+  const mine = writtenAs(value);
+  if (!mine) return "";
+  const folder = note.includes("/") ? note.slice(0, note.lastIndexOf("/")) : "";
+  const siblings = (await vaultNotes(vault, scope)).filter((rel) => rel !== note
+    && (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") === folder).slice(0, SIBLINGS_READ);
+  const forms = new Map<string, { count: number; example: unknown; from: string }>();
+  let seen = 0;
+  for (const sibling of siblings) {
+    let data: Record<string, unknown>;
+    try {
+      data = readFrontmatter(await vault.read(sibling)).data;
+    } catch {
+      continue;
+    }
+    const form = writtenAs(data[key]);
+    if (!form) continue;
+    seen++;
+    const entry = forms.get(form) ?? { count: 0, example: data[key], from: sibling };
+    entry.count++;
+    forms.set(form, entry);
+  }
+  // A habit is two notes or more, and at least two thirds of those that have the property
+  const [form, most] = [...forms.entries()].sort((a, b) => b[1].count - a[1].count)[0] ?? [];
+  if (!form || !most || form === mine || most.count < 2 || most.count * 3 < seen * 2) return "";
+  const example = typeof most.example === "string" ? most.example : pyRepr(most.example);
+  const where = folder ? ` in '${folder}'` : "";
+  return `\n[Other notes${where} write ${key} as ${form}, e.g. ${example} in '${most.from}'. If this one should match, `
+    + "set it again.]";
+}
+
 export function makeMetadataTools(vault: VaultPort, scope: string[] | null = null): Tool[] {
   const getMetadata = defineTool("get_metadata", async (args) => {
     const { note, error } = await resolveExistingNote(vault, args.str("path"), scope);
@@ -113,7 +174,7 @@ export function makeMetadataTools(vault: VaultPort, scope: string[] | null = nul
     }
     const stored = parseValue(args.str("value"));
     await modifyFile(vault, resolved, (text) => setFrontmatter(text, { [key]: stored }));
-    return `Set ${key} to ${shown(stored)} in '${resolved}'`;
+    return `Set ${key} to ${shown(stored)} in '${resolved}'` + await formHint(vault, scope, resolved, key, stored);
   });
 
   return [getMetadata, updateMetadata];

@@ -8,18 +8,16 @@
  * list to choose from, and what is used when nothing is chosen.
  */
 
-import { type App, Notice, Setting } from "obsidian";
+import { type App, Notice, type Setting, type SettingDefinitionGroup, type SettingGroupItem } from "obsidian";
 
 import type { ConfigDocument } from "../api/types";
-import { renderField, type ConfigHost } from "./ConfigSections";
+import { fieldItem, type ConfigHost } from "./ConfigSections";
 import { ApprovalModal, ConnectionModal } from "./ConnectionModal";
 import {
-  addLocalServer, describeConnection, draftChange, draftOf, findLocalServers, getVia, modelIds, modelsUrl, serverLabel,
-  testVerdict,
-  type ConnectionDraft, type ProbeAnswer, type Profiles,
+  addLocalServer, describeConnection, draftChange, draftOf, getVia, modelIds, modelsUrl, serverLabel, testVerdict,
+  type ConnectionDraft, type LocalServer, type ProbeAnswer, type Profiles,
 } from "./connections";
 import { detectServer } from "../config/servers";
-import { group } from "./layout";
 import { buildSection, profileSchema, type ConfigField } from "./schemaForm";
 
 export interface ProfilesHost extends ConfigHost {
@@ -27,7 +25,7 @@ export interface ProfilesHost extends ConfigHost {
   app: App;
   /** GET a URL, with *headers* when given; null when nothing answers. */
   probe(url: string, headers?: Record<string, string>): Promise<ProbeAnswer | null>;
-  /** Fetch the config again and draw the tab anew, after a change to the list itself. */
+  /** Read the config again and describe the settings anew, after a change to the list itself. */
   redraw(): void;
   /** Where a connection's key goes and whether this device approved it; null when it sends no key (#136). */
   connectionApproval?(name: string): { what: string; approved: boolean } | null;
@@ -40,100 +38,131 @@ export interface ProfilesHost extends ConfigHost {
 const CONNECTION_BASICS = ["provider", "base_url", "model", "api_key"];
 
 
-export function renderProfiles(container: HTMLElement, doc: ConfigDocument, host: ProfilesHost): void {
+/**
+ * The connections as one group (#321): the default, a row per connection with its further settings on a page of its
+ * own, the row to add one, and the local servers *found* that no connection points at yet. Drawing the add row
+ * calls *lookForServers*, which lists what answers on this machine once it has.
+ */
+export function connectionGroup(doc: ConfigDocument, host: ProfilesHost, found: LocalServer[],
+                                lookForServers: () => void): SettingDefinitionGroup {
   const profiles = (doc.values.llm_profiles ?? {}) as Profiles;
   const fallback = typeof doc.values.default_llm_profile === "string" ? doc.values.default_llm_profile : "";
   const names = Object.keys(profiles).sort((a, b) => a.localeCompare(b));
-
-  container = group(container, undefined,
-                    "Where the agent sends your notes. A cloud connection sends what the agent reads to that provider.");
+  const items: SettingGroupItem[] = [];
 
   if (names.length) {
-    new Setting(container)
-      .setName("Default connection")
-      .setDesc("Used when a conversation does not pick one in the chat header.")
-      .addDropdown((dropdown) => {
-        if (!fallback) dropdown.addOption("", "None chosen yet");
-        for (const name of names) dropdown.addOption(name, name);
-        dropdown.setValue(fallback).onChange((value) => void apply(host, { default_llm_profile: value || null }));
-      });
+    items.push({
+      name: "Default connection",
+      desc: "Used when a conversation does not pick one in the chat header.",
+      render: (setting) => {
+        setting.addDropdown((dropdown) => {
+          if (!fallback) dropdown.addOption("", "None chosen yet");
+          for (const name of names) dropdown.addOption(name, name);
+          dropdown.setValue(fallback).onChange((value) => void apply(host, { default_llm_profile: value || null }));
+        });
+      },
+    });
   }
 
   const entry = profileSchema(doc.schema);
   for (const name of names) {
     const values = profiles[name];
-    const row = new Setting(container).setName(name);
-    const summary = row.descEl.createDiv({ text: describeConnection(values) });
-    // Which kind of server answers there, once it has said (#149): asked without a key, so nothing is sent
-    if (typeof values.base_url === "string" && values.base_url.trim()) {
-      void detectServer(values.base_url, getVia((url) => host.probe(url)),
-                        typeof values.model === "string" ? values.model : "")
-        .then((facts) => { if (facts.kind) summary.setText(describeConnection(values, facts.kind)); })
-        .catch(() => undefined);
-    }
-    const draft = draftOf(name, values);
-    // A key written out here is never used; the form shows it masked, so say it in words (#146)
-    const writtenKey = typeof values.api_key === "string" ? values.api_key.trim() : "";
-    if (writtenKey && !/^\$\{[^}]+\}$/.test(writtenKey)) {
-      row.descEl.createDiv({ cls: "obsidian-agent-found mod-warning",
-        text: "Its API key is written out in the settings, and a key there is never used: open it and pick one "
-              + "from the keychain." });
-    } else if (draft.key && host.keychain && !host.keychain.names().includes(draft.key)) {
-      row.descEl.createDiv({ cls: "obsidian-agent-found mod-warning",
-        text: `There is no entry '${draft.key}' in the keychain on this device, so it has no key.` });
-    }
-    const approval = host.connectionApproval?.(name);
-    if (approval && !approval.approved) {
-      // Its key and address came from settings this device has not approved — another device, or a version before
-      // approvals: nothing is sent until someone here has looked (#136); asked in a dialog, as for MCP (#149)
-      row.descEl.createDiv({ cls: "obsidian-agent-found mod-warning",
-        text: "Not approved on this device yet: the agent does not use it until you approve where its key goes." });
-      row.addButton((button) => button.setButtonText("Approve").setCta().onClick(() => {
-        new ApprovalModal(host.app,
-          `Allow '${name}' to send its key?`,
-          [`The connection ${approval.what}. Approve it only if you set this up, or trust whoever did.`,
-           "The approval is for this address and this key on this device only; if either changes — here or on "
-           + "another device — it is asked for again."],
-          "", (yes) => {
-            if (!yes) return;
-            host.approveConnection?.(name);
-            host.redraw();
-          }).open();
-      }));
-    }
-    row.addButton((button) => button.setButtonText("Test").onClick(async () => {
-      button.setDisabled(true);
-      const verdict = await testDraft(draft, host, !approval || approval.approved);
-      new Notice(`${name}: ${verdict.text}`, 8_000);
-      button.setDisabled(false);
-    }));
-    row.addExtraButton((button) => button.setIcon("pencil").setTooltip(`Edit ${name}`)
-      .onClick(() => openForm(host, draft, names.filter((other) => other !== name), name, fallback)));
-    row.addExtraButton((button) => button.setIcon("trash-2").setTooltip(`Remove ${name}`).onClick(async () => {
-      // A default that names a removed connection would leave turns with nowhere to go, so it goes too
-      const change: Record<string, unknown> = { llm_profiles: { [name]: null } };
-      if (name === fallback) change.default_llm_profile = null;
-      await apply(host, change);
-    }));
-
-    // Sampling, limits, thinking: folded under the row, each field saving on its own
+    items.push({
+      name,
+      desc: describeConnection(values),
+      aliases: ["connection", ...[values.model, values.base_url].filter((value): value is string => typeof value === "string")],
+      render: (setting) => { connectionRow(setting, name, values, names, fallback, host); },
+    });
+    // Sampling, limits, thinking: a page of their own under the row, each field saving on its own
     const section = buildSection(doc.schema, entry, values, ["llm_profiles", name]);
     const key = (field: ConfigField): string => field.path[field.path.length - 1];
-    const more = container.createEl("details", { cls: "obsidian-agent-config-section obsidian-agent-connection-more" });
-    more.createEl("summary", { text: `More for ${name}: sampling, context window, output length, reasoning, service tier` });
-    const moreBody = more.createDiv();
-    for (const field of section.fields.filter((item) => !CONNECTION_BASICS.includes(key(item)))) {
-      renderField(moreBody, field, host);
-    }
+    items.push({
+      type: "page",
+      name: `More for ${name}`,
+      desc: "Sampling, context window, output length, reasoning, service tier, API.",
+      items: [{ type: "group", items: section.fields.filter((item) => !CONNECTION_BASICS.includes(key(item)))
+        .map((field) => fieldItem(field, host)) }],
+    });
   }
 
-  new Setting(container)
-    .setName(names.length ? "Another connection" : "Add a connection")
-    .setDesc("A cloud API with a key from Obsidian's keychain, or a llama.cpp server.")
-    .addButton((button) => (names.length ? button : button.setCta()).setButtonText("Add connection").onClick(() => openForm(
-      host, { name: names.length ? "" : "cloud", baseUrl: "", model: "", key: "" }, names, null,
-      fallback)));
-  void renderDetected(container, profiles, fallback, host);
+  items.push({
+    name: names.length ? "Another connection" : "Add a connection",
+    desc: "A cloud API with a key from Obsidian's keychain, or a llama.cpp server.",
+    render: (setting) => {
+      lookForServers();
+      setting.addButton((button) => (names.length ? button : button.setCta()).setButtonText("Add connection")
+        .onClick(() => openForm(host, { name: names.length ? "" : "cloud", baseUrl: "", model: "", key: "" }, names,
+                                null, fallback)));
+    },
+  });
+  for (const server of found) {
+    items.push({
+      name: `Found: ${serverLabel(server)}`,
+      desc: server.model ? `Serving ${server.model}. Nothing leaves this machine.` : "Nothing leaves this machine.",
+      render: (setting) => {
+        setting.addButton((button) => button.setButtonText(`Add as "${server.name}"`).setCta()
+          .onClick(async () => apply(host, addLocalServer(server, fallback))));
+      },
+    });
+  }
+  return { type: "group", heading: "Connections", items };
+}
+
+/** A connection's row: what it is, what keeps it from being used, and Approve, Test, Edit and Remove. */
+function connectionRow(row: Setting, name: string, values: Record<string, unknown>, names: string[], fallback: string,
+                       host: ProfilesHost): void {
+  // Which kind of server answers there, once it has said (#149): asked without a key, so nothing is sent
+  if (typeof values.base_url === "string" && values.base_url.trim()) {
+    void detectServer(values.base_url, getVia((url) => host.probe(url)), typeof values.model === "string" ? values.model : "")
+      .then((facts) => { if (facts.kind) row.setDesc(describeConnection(values, facts.kind)); })
+      .catch(() => undefined);
+  }
+  const draft = draftOf(name, values);
+  // Warnings go below the description, which the server's kind may still replace
+  const notes = row.infoEl.createDiv();
+  // A key written out here is never used; the form shows it masked, so say it in words (#146)
+  const writtenKey = typeof values.api_key === "string" ? values.api_key.trim() : "";
+  if (writtenKey && !/^\$\{[^}]+\}$/.test(writtenKey)) {
+    notes.createDiv({ cls: "obsidian-agent-found mod-warning",
+      text: "Its API key is written out in the settings, and a key there is never used: open it and pick one "
+            + "from the keychain." });
+  } else if (draft.key && host.keychain && !host.keychain.names().includes(draft.key)) {
+    notes.createDiv({ cls: "obsidian-agent-found mod-warning",
+      text: `There is no entry '${draft.key}' in the keychain on this device, so it has no key.` });
+  }
+  const approval = host.connectionApproval?.(name);
+  if (approval && !approval.approved) {
+    // Its key and address came from settings this device has not approved — another device, or a version before
+    // approvals: nothing is sent until someone here has looked (#136); asked in a dialog, as for MCP (#149)
+    notes.createDiv({ cls: "obsidian-agent-found mod-warning",
+      text: "Not approved on this device yet: the agent does not use it until you approve where its key goes." });
+    row.addButton((button) => button.setButtonText("Approve").setCta().onClick(() => {
+      new ApprovalModal(host.app,
+        `Allow '${name}' to send its key?`,
+        [`The connection ${approval.what}. Approve it only if you set this up, or trust whoever did.`,
+         "The approval is for this address and this key on this device only; if either changes — here or on "
+         + "another device — it is asked for again."],
+        "", (yes) => {
+          if (!yes) return;
+          host.approveConnection?.(name);
+          host.redraw();
+        }).open();
+    }));
+  }
+  row.addButton((button) => button.setButtonText("Test").onClick(async () => {
+    button.setDisabled(true);
+    const verdict = await testDraft(draft, host, !approval || approval.approved);
+    new Notice(`${name}: ${verdict.text}`, 8_000);
+    button.setDisabled(false);
+  }));
+  row.addExtraButton((button) => button.setIcon("pencil").setTooltip(`Edit ${name}`)
+    .onClick(() => openForm(host, draft, names.filter((other) => other !== name), name, fallback)));
+  row.addExtraButton((button) => button.setIcon("trash-2").setTooltip(`Remove ${name}`).onClick(async () => {
+    // A default that names a removed connection would leave turns with nowhere to go, so it goes too
+    const change: Record<string, unknown> = { llm_profiles: { [name]: null } };
+    if (name === fallback) change.default_llm_profile = null;
+    await apply(host, change);
+  }));
 }
 
 /** The form, to add a connection (*previous* null) or change one. */
@@ -182,19 +211,6 @@ async function testDraft(draft: ConnectionDraft, host: ProfilesHost,
   }
   if (draft.key && !withKey) verdict.text += " Tested without its key: approve the connection first.";
   return verdict;
-}
-
-/** Offer each local server that answers and that no connection points at yet. */
-async function renderDetected(container: HTMLElement, profiles: Profiles, fallback: string,
-                              host: ProfilesHost): Promise<void> {
-  const slot = container.createDiv();
-  for (const server of await findLocalServers(profiles, (url) => host.probe(url))) {
-    new Setting(slot)
-      .setName(`Found: ${serverLabel(server)}`)
-      .setDesc(server.model ? `Serving ${server.model}. Nothing leaves this machine.` : "Nothing leaves this machine.")
-      .addButton((button) => button.setButtonText(`Add as "${server.name}"`).setCta()
-        .onClick(async () => apply(host, addLocalServer(server, fallback))));
-  }
 }
 
 /** Save a change to the list and draw it again; a refused change is shown rather than silently redrawn. */

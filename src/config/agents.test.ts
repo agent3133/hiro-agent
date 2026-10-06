@@ -291,3 +291,15 @@ describe("tools the plugin no longer has", () => {
     for (const retired of RETIRED_TOOLS) expect(text).not.toContain(retired);
   });
 });
+
+describe("an agent's folders and the vault's config folder (#322)", () => {
+  it("refuses the config folder the vault uses, renamed or not, and its subfolders", async () => {
+    const vault = await makeVault({ ".config/app.json": "{}", ".obsidian/app.json": "{}", "Journal/a.md": "x" });
+    const catalog = new AgentCatalog(vault.vault, () => ({ defaultAgent: "assistant", profiles: [], configDir: ".config" }));
+    for (const folder of [".config", ".config/plugins", ".obsidian"]) {
+      const result = await catalog.saveAgent("assistant", { fields: { vault_scope: [folder] } });
+      expect(fieldErrors(result).map((error) => error.message)).toEqual([`'${folder}' is not a folder notes live in`]);
+    }
+    expect((await catalog.saveAgent("assistant", { fields: { vault_scope: ["Journal"] } })).ok).toBe(true);
+  });
+});

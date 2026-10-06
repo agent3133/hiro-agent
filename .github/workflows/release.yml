@@ -30,6 +30,7 @@ jobs:
           node -e "const v = require('./versions.json'); if (!v['$version']) { console.log('versions.json has no $version'); process.exit(1) }"
       - run: npm ci
       - run: npm run check-notices
+      - run: npm run lint
       - run: npm run build
       - run: npm test
       - name: Provenance for main.js

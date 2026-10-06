@@ -10,6 +10,8 @@ export interface ContextUsage {
   window: number;
   estimated: boolean;
   peak?: number;
+  /** While an answer runs: *tokens* is what its last request to the model took, with what the agent read. */
+  answering?: boolean;
 }
 
 /** 12345 → "12.3k", 131072 → "131k". */
@@ -30,9 +32,14 @@ export function contextLine(tokens: number, window: number, estimated: boolean):
   return { text: `${estimated ? "≈ " : ""}${tokensShort(tokens)} of ${tokensShort(window)} tokens · ${share}%`, share, level };
 }
 
-/** The status bar item's tooltip. */
+/** The meter's tooltip. */
 export function contextTooltip(usage: ContextUsage): string {
   const share = (tokens: number): number => (usage.window > 0 ? Math.round((tokens / usage.window) * 100) : 0);
+  if (usage.answering) {
+    return "While the agent answers: how much of the model's context window its last request took, with the notes "
+      + "and pages it read" + (usage.estimated ? ", estimated from their length." : ".")
+      + " When the answer is done, the meter shows what the conversation keeps.";
+  }
   const peak = usage.peak && usage.peak > usage.tokens
     ? ` While answering, the last message took up to ${share(usage.peak)}% (${tokensShort(usage.peak)}) with what `
       + "the agent read; that is not kept."

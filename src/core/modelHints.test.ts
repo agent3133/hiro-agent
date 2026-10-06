@@ -59,12 +59,39 @@ describe("create_note and a similar name in the folder (#265)", () => {
     expect(similarNames("2026-09-10", ["Journal/Daily/2026-09-09.md"])).toEqual([]);
   });
 
-  it("adds the hint to the answer, for notes in the same folder only", async () => {
+  it("leaves dated notes that end in the same word alone, as meetings do (M4, 2026-10-06)", () => {
+    const meetings = ["Journal/Meetings/2026-08-21 Analytics Roadmap Review.md", "Journal/Meetings/2026-09-02 Budget Review.md"];
+    expect(similarNames("2026-09-16 Website Relaunch Review", meetings)).toEqual([]);
+    expect(similarNames("Q3 Review", ["Notes/Q2 Review.md"])).toEqual([]);
+  });
+
+  it("creates nothing at first next to a similar name, and the note on the same call again (#269)", async () => {
     const vault = await makeVault({ "People/Tom Becker.md": "# Tom\n", "Archive/Thomas Becker.md": "# Old\n" });
-    expect(await vault.tool("create_note").run({ path: "People/Thomas Becker.md", content: "# Thomas\n" }))
-      .toBe("Created note at 'People/Thomas Becker.md'\n[People/Tom Becker.md has a similar name; if it is the same "
-            + "person or thing, use that note instead.]");
+    const create = vault.tool("create_note");
+    expect(await create.run({ path: "People/Thomas Becker.md", content: "# Thomas\n" }))
+      .toBe("Not created yet: People/Tom Becker.md has a similar name. If it is the same person or thing, use that "
+            + "note; if not, call create_note again with the same path.");
+    expect(await vault.exists("People/Thomas Becker.md")).toBe(false);
+    expect(await create.run({ path: "People/Thomas Becker.md", content: "# Thomas\n" }))
+      .toBe("Created note at 'People/Thomas Becker.md'");
+    expect(await vault.read("People/Thomas Becker.md")).toBe("# Thomas\n");
+  });
+
+  it("creates at once a name with no similar note in its folder", async () => {
+    const vault = await makeVault({ "People/Tom Becker.md": "# Tom\n", "Archive/Thomas Becker.md": "# Old\n" });
     expect(await vault.tool("create_note").run({ path: "People/Anna Weber.md", content: "# Anna\n" }))
       .toBe("Created note at 'People/Anna Weber.md'");
+    // A similar name in another folder does not count
+    expect(await vault.tool("create_note").run({ path: "Notes/Thomas Becker.md", content: "# T\n" }))
+      .toBe("Created note at 'Notes/Thomas Becker.md'");
+  });
+
+  it("holds back each new name once, and never an overwrite of a note that exists", async () => {
+    const vault = await makeVault({ "People/Tom Becker.md": "# Tom\n", "People/Thomas Becker.md": "# Thomas\n" });
+    const create = vault.tool("create_note");
+    expect(await create.run({ path: "People/T. Becker.md", content: "x" })).toMatch(/^Not created yet: /);
+    expect(await create.run({ path: "People/Tom Beckers.md", content: "x" })).toMatch(/^Not created yet: /);
+    expect(await create.run({ path: "People/Thomas Becker.md", content: "# New\n", overwrite: true }))
+      .toBe("Created note at 'People/Thomas Becker.md'");
   });
 });

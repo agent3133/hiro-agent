@@ -79,6 +79,8 @@ async function removeQueryFile(app: App, name: string): Promise<void> {
     await pause(250);
     const file = app.vault.getAbstractFileByPath(name);
     if (!(file instanceof TFile)) return;
+    // Deleted for good, not to the trash: the plugin's own temporary note, which a trash would collect from every
+    // query (#322). The review's prefer-file-manager-trash-file warns about this line on purpose
     await app.vault.delete(file).catch(() => undefined);
   }
   if (app.vault.getAbstractFileByPath(name)) new Notice(`Hiro Agent: delete '${name}', left from a Base query`);

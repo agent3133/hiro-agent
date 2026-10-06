@@ -54,7 +54,7 @@ runs only after you approve its exact command line on each device — see [the g
 
 | | |
 |---|---|
-| **Obsidian** | 1.12.2 or later |
+| **Obsidian** | 1.13 or later |
 | **Platform** | Desktop — Windows, macOS, Linux |
 | **A model** | A model server on your computer — llama.cpp, Ollama, LM Studio or vLLM — or an OpenAI-compatible API with a key. llama.cpp is the one tested most; the others speak the same API. |
 | **Optional** | whisper.cpp and ffmpeg (recordings and videos), MCP servers (more tools — web search among them) |
@@ -109,7 +109,7 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
 - **Commands and a CLI** — ask an agent about the open note or the selection from the command palette, or run the
   agent from a terminal with `obsidian agent:ask` while Obsidian is running.
 
-The tools, grouped as the Agents tab shows them — each agent gets only the ones it lists:
+The tools, grouped as the Agents page shows them — each agent gets only the ones it lists:
 
 | Group | Tools |
 |---|---|
@@ -125,7 +125,7 @@ Everything in detail: **[the guide](docs/guide.md)**.
 
 ![Taking a turn back: the undo dialog shows the diff of what the agent changed](images/undo.png)
 
-![The Agents tab: an agent's prompt, and below it the folders and tools it may use](images/agents.png)
+![The Agents page: an agent's prompt, and below it the folders and tools it may use](images/agents.png)
 
 ## Privacy and security
 
@@ -162,7 +162,6 @@ free, with no subscription and no paid tier gating any of it. What is free today
 
 - **Mobile** — desktop only for now; the plugin runs local programs and streams over Node's `http`.
 - **Shell tools and git** — left out by design, and not on the roadmap.
-- **Undo for turns run from the terminal** — the undo button belongs to turns run in the chat view.
 
 ## Known limitations
 
@@ -176,6 +175,9 @@ Kept current during the beta; a limitation listed here does not need reporting a
   on, the answers' tool calls. An older version of the plugin shows those calls as text in the answer.
 - OpenAI's Responses API, which a connection to OpenAI now uses, has been tried with gpt-6.1-sol only. If another
   OpenAI model misbehaves, set *API* to *chat completions* under the connection's *More for …* and report it.
+- Undo and going back to an earlier message remember what answers changed only while Obsidian runs: after a restart
+  or a reload of the plugin, going back still removes the messages, but what those answers changed in the vault
+  stays, and the dialog says so.
 
 ## Feedback and issues
 

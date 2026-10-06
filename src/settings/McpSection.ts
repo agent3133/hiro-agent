@@ -6,14 +6,13 @@
  * editing one shows that line and asks. A server that arrived by sync waits here, marked, until someone says yes.
  */
 
-import { App, Modal, Notice, Setting } from "obsidian";
+import { App, Modal, Notice, Setting, type SettingDefinitionGroup, type SettingGroupItem } from "obsidian";
 
 import type { ConfigWriteResult } from "../api/types";
 import { messageOf } from "../core/errors";
 import { draftOf, emptyDraft, serverChange, type McpDraft } from "../mcp/draft";
 import type { McpServerStatus, McpTest } from "../mcp/service";
 import type { McpServerSpec } from "../mcp/servers";
-import { group } from "./layout";
 
 export interface McpUiHost {
   app: App;
@@ -25,81 +24,95 @@ export interface McpUiHost {
   redraw(): void;
 }
 
-export function renderMcp(container: HTMLElement, host: McpUiHost): void {
-  const card = group(container, "MCP servers",
-    "Tools from other programs and services (Model Context Protocol). An agent uses them when its tools list "
-    + "them. A server that is a program on this computer runs only once approved on this device, for "
-    + "exactly the command line shown. A key stays in Obsidian's keychain (Settings → Keychain): write "
-    + "${its-name} in the environment or a header.");
+/** What the MCP servers are, said once above their list. */
+const INTRO = "Tools from other programs and services (Model Context Protocol). An agent uses them when its tools "
+  + "list them. A server that is a program on this computer runs only once approved on this device, for exactly the "
+  + "command line shown. A key stays in Obsidian's keychain (Settings → Keychain): write ${its-name} in the "
+  + "environment or a header.";
+
+/** The MCP servers as one group: a row per server, and one to add another (#321). */
+export function mcpGroup(host: McpUiHost): SettingDefinitionGroup {
   const servers = host.status();
-  if (!servers.length) card.createEl("p", { cls: "setting-item-description", text: "No MCP servers yet." });
-
+  const taken = servers.map((one) => one.spec.name);
+  const items: SettingGroupItem[] = [{ name: "What MCP servers are", desc: INTRO }];
   for (const server of servers) {
-    const { spec } = server;
-    const setting = new Setting(card).setName(spec.name);
-    const where = spec.transport === "stdio" ? server.commandLine : spec.url;
-    setting.descEl.createEl("code", { text: where, cls: "obsidian-agent-mcp-command" });
-    if (spec.transport === "stdio") {
-      setting.descEl.createDiv({
-        cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
-        text: server.approved ? "Approved to run on this device." : "Not approved on this device: it will not start.",
-      });
-    } else if (server.commandLine) {
-      // It sends a key from the keychain: used only once approved here, for this address and these headers (#136)
-      setting.descEl.createDiv({
-        cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
-        text: server.approved ? "Approved on this device to receive the key it names."
-          : "Not approved on this device: it would receive a key from your keychain, so it is not used.",
-      });
-    } else {
-      setting.descEl.createDiv({ cls: "obsidian-agent-found", text: "Sends what the agent asks it to this address." });
-    }
-    const result = setting.descEl.createDiv({ cls: "obsidian-agent-mcp-result" });
+    items.push({
+      name: server.spec.name,
+      aliases: ["MCP", server.spec.transport === "stdio" ? server.commandLine : server.spec.url ?? ""],
+      render: (setting) => { serverRow(setting, server, host, taken); },
+    });
+  }
+  items.push({
+    name: servers.length ? "Another server" : "No MCP servers yet",
+    desc: "A program on this computer, or a service at an address.",
+    render: (setting) => {
+      setting.addButton((button) => button.setButtonText("Add server").onClick(() => openEditor(host, null, taken)));
+    },
+  });
+  return { type: "group", heading: "MCP servers", items };
+}
 
-    if (!server.approved) {
-      setting.addButton((button) => button.setButtonText("Approve").setCta().onClick(() => {
-        new ApproveModal(host.app, spec, server.commandLine, (yes) => {
-          if (!yes) return;
-          host.approve(spec.name);
-          host.redraw();
-        }).open();
-      }));
-    }
-    setting.addButton((button) => button.setButtonText("Test").onClick(async () => {
-      button.setDisabled(true);
-      result.setText("Connecting…");
-      const answer = await host.test(spec.name);
-      button.setDisabled(false);
-      result.toggleClass("mod-warning", !answer.ok);
-      result.setText(answer.ok
-        ? (answer.tools.length ? `${answer.tools.length} tools: ${answer.tools.map((tool) => tool.name).join(", ")}`
-          : "Connected; it offers no tools (or the filter lets none through).")
-        : answer.error);
-    }));
-    setting.addToggle((toggle) => toggle.setValue(spec.enabled).setTooltip("On or off, for every agent")
-      .onChange(async (value) => {
-        const saved = await host.save({ mcp_servers: { [spec.name]: { enabled: value } } });
-        if (saved?.ok) return;
-        toggle.setValue(!value);
-        // A null result was already told as a notice by the save
-        if (saved) {
-          const reason = saved.fields.map((item) => item.message).join("; ") || saved.error || "refused";
-          new Notice(`'${spec.name}' was not switched ${value ? "on" : "off"}: ${reason}`, 10_000);
-        }
-      }));
-    setting.addExtraButton((button) => button.setIcon("pencil").setTooltip("Edit").onClick(() => {
-      openEditor(host, spec, servers.map((one) => one.spec.name));
-    }));
-    setting.addExtraButton((button) => button.setIcon("trash").setTooltip("Remove").onClick(async () => {
-      const saved = await host.save({ mcp_servers: { [spec.name]: null } });
-      if (!saved?.ok) return;
-      await host.revoke(spec.name);
-      host.redraw();
+/** One server's row: where it runs or what it reaches, whether it is approved here, and what can be done to it. */
+function serverRow(setting: Setting, server: McpServerStatus, host: McpUiHost, taken: string[]): void {
+  const { spec } = server;
+  const where = spec.transport === "stdio" ? server.commandLine : spec.url;
+  setting.descEl.createEl("code", { text: where, cls: "obsidian-agent-mcp-command" });
+  if (spec.transport === "stdio") {
+    setting.descEl.createDiv({
+      cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
+      text: server.approved ? "Approved to run on this device." : "Not approved on this device: it will not start.",
+    });
+  } else if (server.commandLine) {
+    // It sends a key from the keychain: used only once approved here, for this address and these headers (#136)
+    setting.descEl.createDiv({
+      cls: server.approved ? "obsidian-agent-found" : "obsidian-agent-found mod-warning",
+      text: server.approved ? "Approved on this device to receive the key it names."
+        : "Not approved on this device: it would receive a key from your keychain, so it is not used.",
+    });
+  } else {
+    setting.descEl.createDiv({ cls: "obsidian-agent-found", text: "Sends what the agent asks it to this address." });
+  }
+  const result = setting.descEl.createDiv({ cls: "obsidian-agent-mcp-result" });
+
+  if (!server.approved) {
+    setting.addButton((button) => button.setButtonText("Approve").setCta().onClick(() => {
+      new ApproveModal(host.app, spec, server.commandLine, (yes) => {
+        if (!yes) return;
+        host.approve(spec.name);
+        host.redraw();
+      }).open();
     }));
   }
-
-  new Setting(card).addButton((button) => button.setButtonText("Add server").onClick(() => {
-    openEditor(host, null, servers.map((one) => one.spec.name));
+  setting.addButton((button) => button.setButtonText("Test").onClick(async () => {
+    button.setDisabled(true);
+    result.setText("Connecting…");
+    const answer = await host.test(spec.name);
+    button.setDisabled(false);
+    result.toggleClass("mod-warning", !answer.ok);
+    result.setText(answer.ok
+      ? (answer.tools.length ? `${answer.tools.length} tools: ${answer.tools.map((tool) => tool.name).join(", ")}`
+        : "Connected; it offers no tools (or the filter lets none through).")
+      : answer.error);
+  }));
+  setting.addToggle((toggle) => toggle.setValue(spec.enabled).setTooltip("On or off, for every agent")
+    .onChange(async (value) => {
+      const saved = await host.save({ mcp_servers: { [spec.name]: { enabled: value } } });
+      if (saved?.ok) return;
+      toggle.setValue(!value);
+      // A null result was already told as a notice by the save
+      if (saved) {
+        const reason = saved.fields.map((item) => item.message).join("; ") || saved.error || "refused";
+        new Notice(`'${spec.name}' was not switched ${value ? "on" : "off"}: ${reason}`, 10_000);
+      }
+    }));
+  setting.addExtraButton((button) => button.setIcon("pencil").setTooltip("Edit").onClick(() => {
+    openEditor(host, spec, taken);
+  }));
+  setting.addExtraButton((button) => button.setIcon("trash").setTooltip("Remove").onClick(async () => {
+    const saved = await host.save({ mcp_servers: { [spec.name]: null } });
+    if (!saved?.ok) return;
+    await host.revoke(spec.name);
+    host.redraw();
   }));
 }
 
@@ -162,7 +175,7 @@ class ApproveModal extends Modal {
         + "another device — it is asked for again." });
     new Setting(contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.answer(false)))
-      .addButton((button) => button.setButtonText("Allow on this device").setWarning().onClick(() => this.answer(true)));
+      .addButton((button) => button.setButtonText("Allow on this device").setDestructive().onClick(() => this.answer(true)));
   }
 
   override onClose(): void {

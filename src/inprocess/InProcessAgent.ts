@@ -22,6 +22,7 @@ import { compactHistory, dueForCompaction, estimateMessages, KEEP_SHARE, recentT
          splitHistory, summariseLimit } from "../core/compaction";
 import { serially } from "../core/serial";
 import { Journal, type Turn } from "../core/journal";
+import { undoTurns, withoutLast, type RewindResult } from "../core/rewind";
 import { OpenAiChat, type ChatModel, type LlmSettings } from "../core/llm/openaiChat";
 import { OpenAiResponses } from "../core/llm/openaiResponses";
 import { scopePrompt, toolConventions } from "../core/paths";
@@ -369,8 +370,12 @@ export class InProcessAgent {
       maxToolResultChars: Math.floor(window * TOOL_RESULT_SHARE * CHARS_PER_TOKEN),
       contextWindow: window,
       events: {
-        // The most the answer took along the way; the meter shows it only in its tooltip (#154)
-        onUsage: (tokens) => { peak = Math.max(peak, tokens); },
+        // The most the answer took along the way, for the meter's tooltip (#154); and the meter follows each request
+        // while the answer runs, so a long answer shows the window filling (2026-10-06)
+        onUsage: (tokens, estimated) => {
+          peak = Math.max(peak, tokens);
+          handlers.onContext?.(tokens, window, estimated, peak, true);
+        },
         onSetAside: (total) => handlers.onSetAside?.(total),
         onServiceTier: (tier) => handlers.onServiceTier?.(tier),
         onToken: handlers.onToken,
@@ -600,6 +605,40 @@ export class InProcessAgent {
       if (now !== change.after) stale.push(target);
     }
     return { files: this.journal!.paths(turn), diff: this.journal!.diff(turn), undone: turn.undone, stale };
+  }
+
+  /**
+   * Go back to before an earlier message (#303): what the answers *turns* changed is taken back, newest first, then
+   * the conversation loses its last *exchanges* questions and answers — in its note when it is kept, in memory when
+   * not. In the queue of answers, so it never runs beside one.
+   */
+  async rewind(target: { session?: string; view?: string }, exchanges: number,
+               turns: string[]): Promise<RewindResult & { removed: number }> {
+    return this.oneAtATime(async () => {
+      const result = await undoTurns(this.journal, this.vault, turns);
+      const name = target.session;
+      if (!name) {
+        const conversation = this.conversations.get(scratchKey(target.view));
+        const before = conversation?.loaded.filter((m) => m.role === "user").length ?? 0;
+        if (conversation) conversation.loaded = withoutLast(conversation.loaded, exchanges);
+        const after = conversation?.loaded.filter((m) => m.role === "user").length ?? 0;
+        return { ...result, removed: before - after };
+      }
+      // A kept conversation is cut in its note, and read again from it at the next message
+      this.conversations.delete(name);
+      const { messages, calls } = await loadSessionWithCalls(this.vault, name);
+      const said = messages.filter((m) => m.role !== "system");
+      const kept = withoutLast(said, exchanges);
+      const meta = await sessionMeta(this.vault, name);
+      const count = kept.filter((m) => m.role === "user").length;
+      const connections = (Array.isArray(meta.connections) ? meta.connections as ConnectionChange[] : [])
+        .filter((change) => change.exchange <= count);
+      await saveSession(this.vault, name, kept, {
+        agent: String(meta.agent ?? ""), model: String(meta.model ?? ""), connection: String(meta.connection ?? ""),
+        connections, calls,
+      });
+      return { ...result, removed: said.filter((m) => m.role === "user").length - count };
+    });
   }
 
   async undoTurn(id: string): Promise<UndoResult> {

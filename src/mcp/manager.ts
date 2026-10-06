@@ -110,7 +110,7 @@ export class McpManager {
         for (const tool of page.tools) {
           const hints = tool.annotations ?? {};
           listed.push({ server: spec.name, name: tool.name, description: tool.description ?? "",
-                        inputSchema: tool.inputSchema as Record<string, unknown>,
+                        inputSchema: tool.inputSchema,
                         destructive: hints.readOnlyHint !== true && hints.destructiveHint !== false });
         }
         cursor = page.nextCursor;

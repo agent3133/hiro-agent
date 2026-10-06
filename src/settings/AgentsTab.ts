@@ -106,8 +106,8 @@ export async function renderAgents(pane: HTMLElement, host: AgentsHost): Promise
     .setDesc("Answers a conversation or command that does not pick an agent.")
     .addDropdown((dropdown) => {
       for (const agent of agents) dropdown.addOption(agent.name, agent.name);
-      dropdown.setValue(fallback).onChange(async (name) => {
-        if (await host.setDefault(name)) host.redraw();
+      dropdown.setValue(fallback).onChange((name) => {
+        void host.setDefault(name).then((set) => { if (set) host.redraw(); });
       });
     });
   const picker = new Setting(top).setName("Agent").addDropdown((dropdown) => {
@@ -117,7 +117,7 @@ export async function renderAgents(pane: HTMLElement, host: AgentsHost): Promise
       state.dirty = false;
       state.kept = null;
       host.redraw();
-    }, () => dropdown.setValue(state.selected)));
+    }, () => { dropdown.setValue(state.selected); }));
   });
   picker.addButton((button) => button.setButtonText("New").onClick(() => discard(() => {
     new NameModal(host.app, "A new agent", "", (name) => void create(name, "", host)).open();
@@ -211,7 +211,7 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
   }));
   if (agent.can_reset) {
     picker.addButton((button) => button.setButtonText("Reset").setTooltip("Use the built-in version again")
-      .setWarning().onClick(() => ask(host.app, `Reset ${name}?`,
+      .setDestructive().onClick(() => ask(host.app, `Reset ${name}?`,
         `Your copy of ${name} is dropped, and the built-in one answers again.`, "Reset", async (yes) => {
         if (!yes) return;
         try {
@@ -227,7 +227,7 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
       })));
   }
   if (agent.can_delete) {
-    picker.addButton((button) => button.setButtonText("Delete").setWarning().onClick(() => ask(host.app,
+    picker.addButton((button) => button.setButtonText("Delete").setDestructive().onClick(() => ask(host.app,
       `Delete ${name}?`, `The agent's file is removed: ${agent.path}`, "Delete", async (yes) => {
       if (!yes) return;
       try {
@@ -310,7 +310,7 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
   new Setting(running).setName("Connection")
     .setDesc("Where this agent sends notes. A connection chosen in the chat header wins over this one.")
     .addDropdown((dropdown) => {
-      dropdown.addOption("", "the chat's choice, or the default");
+      dropdown.addOption("", "The chat's choice, or the default");
       for (const profile of host.profiles) dropdown.addOption(profile, profile);
       if (draft.llm_profile && !host.profiles.includes(draft.llm_profile)) {
         dropdown.addOption(draft.llm_profile, `${draft.llm_profile} (not configured)`);
@@ -570,6 +570,10 @@ class NameModal extends Modal {
 }
 
 /** A yes/no question in Obsidian's own dialog; dismissing it is no. */
-function ask(app: App, title: string, body: string, confirm: string, decide: (yes: boolean) => void): void {
-  new AskModal(app, { title, body, confirm }, decide).open();
+/** Ask in a dialog; *decide* may be async, and a failure in it is said in a notice rather than lost. */
+function ask(app: App, title: string, body: string, confirm: string,
+             decide: (yes: boolean) => void | Promise<void>): void {
+  new AskModal(app, { title, body, confirm }, (yes) => {
+    void Promise.resolve(decide(yes)).catch((error: unknown) => new Notice(messageOf(error), 10_000));
+  }).open();
 }

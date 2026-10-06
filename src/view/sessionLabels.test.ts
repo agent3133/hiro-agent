@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readableName, sessionLabels, startedAt } from "./sessionLabels";
+import { listedSessions, readableName, sessionLabels, startedAt } from "./sessionLabels";
 
 // The picker showed file names ("2026-10-05-1143-go-through-every-tool-in-your"); it shows titles now (#286)
 describe("how a conversation is called in the picker", () => {
@@ -30,5 +30,20 @@ describe("how a conversation is called in the picker", () => {
     expect(labels.get("2026-10-05-1104-hey")).toBe("hey · 5 Oct 11:04");
     expect(labels.get("2026-10-04-0930-hey")).toBe("hey · 4 Oct 09:30");
     expect(labels.get("2026-10-03-0800-budget")).toBe("Hey · 3 Oct 08:00");
+  });
+});
+
+describe("the conversations the picker lists (2026-10-06)", () => {
+  const made = (name: string) => ({ name, exchanges: 0 });
+  const notes = [{ name: "2026-10-05-1104-hey", exchanges: 3 }, { name: "2026-10-04-0930-budget", exchanges: 1 }];
+
+  it("lists the open conversation first while it has no note yet", () => {
+    expect(listedSessions(notes, "2026-10-06-0900-summaries", made).map((s) => s.name))
+      .toEqual(["2026-10-06-0900-summaries", "2026-10-05-1104-hey", "2026-10-04-0930-budget"]);
+  });
+
+  it("lists the notes as they are when the open one has its note, or none is open", () => {
+    expect(listedSessions(notes, "2026-10-04-0930-budget", made)).toBe(notes);
+    expect(listedSessions(notes, "", made)).toBe(notes);
   });
 });

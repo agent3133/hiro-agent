@@ -181,7 +181,7 @@ export interface TurnHandlers {
    * How full the context window is after the answer (#151, #154): the tokens the conversation takes now — what the
    * next message carries — of the window, whether estimated, and the most the answer took along the way.
    */
-  onContext?(tokens: number, window: number, estimated: boolean, peak?: number): void;
+  onContext?(tokens: number, window: number, estimated: boolean, peak?: number, answering?: boolean): void;
   /** A model call of the answer was served at this service tier, as OpenAI said (#295). */
   onServiceTier?(tier: string): void;
   onDone(reply: string, cancelled: boolean, usage: Record<string, unknown>,

@@ -6,7 +6,12 @@
  * rules hold for the Node vault and for Obsidian's.
  */
 
-/** Obsidian's own configuration. No tool reaches it. */
+/**
+ * Obsidian's own configuration folder by its default name, the one place it is written (#322). No tool reaches it,
+ * whatever the vault calls its folder: a renamed one is protected as well (`protectVaultPaths`, from
+ * `app.vault.configDir`), and where Obsidian is there its own value is what is read. Kept as a default on purpose —
+ * the review's `hardcoded-config-path` warns about it — so the folder stays protected wherever no value was passed.
+ */
 export const OBSIDIAN_DIR = ".obsidian";
 
 /**

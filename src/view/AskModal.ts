@@ -24,7 +24,7 @@ export class AskModal extends Modal {
 
     new Setting(contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
-      .addButton((button) => button.setButtonText(this.question.confirm).setWarning()
+      .addButton((button) => button.setButtonText(this.question.confirm).setDestructive()
         .onClick(() => this.answer(true)));
   }
 

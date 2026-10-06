@@ -90,6 +90,6 @@ export function serverChange(draft: McpDraft, previous: McpServerSpec | null, ta
     }
   }
   const change: Record<string, unknown> = { [name]: server };
-  if (renamed) change[previous!.name] = null;
+  if (renamed) change[previous.name] = null;
   return { mcp_servers: change };
 }

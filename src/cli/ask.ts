@@ -72,6 +72,8 @@ export interface AskResult {
   tool_calls: number;
   seconds: number;
   changed: string[];
+  /** The answer's id for `agent:undo turn=…` (#302), when it changed anything; "" otherwise. */
+  turn: string;
   /** Destructive tools that were refused, and why. */
   refused: string[];
   /** Destructive tools that ran without anyone being asked (allow=destructive with the Developer setting). */
@@ -99,7 +101,7 @@ export interface AskContext {
 }
 
 function failure(error: string): AskResult {
-  return { ok: false, reply: "", error, agent: "", connection: "", session: "", tool_calls: 0, seconds: 0, changed: [],
+  return { ok: false, reply: "", error, agent: "", connection: "", session: "", tool_calls: 0, seconds: 0, changed: [], turn: "",
            refused: [], unasked: [], stopped: false, kept: false, calls: [],
            context: { window: 0, peak_tokens: 0, set_aside: 0, summarised: 0, service_tiers: {} } };
 }
@@ -196,9 +198,9 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
       },
       onDone: (final, _cancelled, usage, changed: TurnChanges | null) => {
         finish({ ok: true, reply: final || reply, tool_calls: Number(usage.tool_calls ?? 0) || 0,
-                 changed: changed?.files ?? [] });
+                 changed: changed?.files ?? [], turn: changed?.turn ?? "" });
       },
-      onError: (message) => finish({ ok: false, reply, error: message, tool_calls: 0, changed: [] }),
+      onError: (message) => finish({ ok: false, reply, error: message, tool_calls: 0, changed: [], turn: "" }),
     };
     const turn = host.send(prompt, { agent, session, profile: connection || undefined, keep: kept,
                                      context: note || selection ? { ...(note ? { active_note: note } : {}), ...(selection ? { selection } : {}) }
@@ -218,6 +220,7 @@ export function askText(result: AskResult): string {
   for (const line of result.refused) notes.push(`[${line}]`);
   for (const line of result.unasked) notes.push(`[${line}]`);
   if (result.changed.length) notes.push(`[changed: ${result.changed.join(", ")}]`);
+  if (result.turn) notes.push(`[undo: obsidian agent:undo turn=${result.turn}]`);
   notes.push(`[${result.agent}${result.connection ? ` on ${result.connection}` : ""} · ${result.tool_calls} tool calls · `
              + `${result.seconds}s · ${result.kept ? `saved as ${result.session}` : "not saved"}]`);
   return `${result.reply.trim()}\n\n${notes.join("\n")}`;

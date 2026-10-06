@@ -168,7 +168,7 @@ function dumpYaml(data: Record<string, unknown>): string {
       const text = node.value;
       if (text === "" || /^\d{4}-\d\d-\d\d/.test(text) || /^[-+]?(\d+\.?\d*|\.\d+)$/.test(text)
           || /^(true|false|yes|no|null|on|off|~)$/i.test(text)) {
-        (node as Scalar).type = Scalar.QUOTE_SINGLE;
+        node.type = Scalar.QUOTE_SINGLE;
       }
     },
   });
@@ -345,6 +345,7 @@ export async function listSessions(vault: VaultPort): Promise<SessionSummary[]> 
 export async function deleteSession(vault: VaultPort, name: string): Promise<boolean> {
   const path = sessionPath(name);
   if (!(await vault.isFile(path))) return false;
+  // Into the trash Obsidian is set to use, so a conversation deleted by mistake can come back (#322)
   await vault.remove(path);
   return true;
 }

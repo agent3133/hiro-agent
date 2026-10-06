@@ -108,7 +108,7 @@ export class ApprovalModal extends Modal {
     if (this.detail) this.contentEl.createEl("pre", { text: this.detail, cls: "obsidian-agent-confirm-detail" });
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.answer(false)))
-      .addButton((button) => button.setButtonText("Allow on this device").setWarning().onClick(() => this.answer(true)));
+      .addButton((button) => button.setButtonText("Allow on this device").setDestructive().onClick(() => this.answer(true)));
   }
 
   override onClose(): void {

@@ -1,8 +1,8 @@
 {
   "id": "agent",
   "name": "Hiro Agent",
-  "version": "0.9.2",
-  "minAppVersion": "1.12.2",
+  "version": "0.9.3",
+  "minAppVersion": "1.13.0",
   "description": "Chat with an AI agent that reads, searches, writes and moves your notes through your own model: a local llama.cpp server or any OpenAI-compatible API. No external CLI.",
   "author": "Alex M.",
   "authorUrl": "https://github.com/agent3133",

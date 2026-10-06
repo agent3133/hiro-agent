@@ -14,6 +14,7 @@ import { parseDocument } from "yaml";
 import type { AgentDetail, AgentFields, AgentSource, AgentSummary, AgentWrite, ConfigFieldError, ToolInfo } from "../api/types";
 import { readFrontmatter } from "../core/frontmatter";
 import specs from "../core/tools/specs.json";
+import { OBSIDIAN_DIR } from "../core/paths";
 import type { VaultPort } from "../core/vault";
 import bundledAgents from "./bundled-agents.json";
 
@@ -111,11 +112,12 @@ function load(text: string, file: string, source: AgentSource, path: string): Ag
 export class AgentCatalog {
   /**
    * @param vault the vault, whose `.agents/` holds the user's agents
-   * @param config the agent's settings now: the default agent and the connections an agent may name
+   * @param config the agent's settings now: the default agent, the connections an agent may name, and the vault's
+   *   config folder (Obsidian's `configDir`), which no agent's folders may name
    */
   /** *mcpTools*: the MCP servers' tools as the settings list them (#87); none when not given. */
   constructor(private readonly vault: VaultPort,
-              private readonly config: () => { defaultAgent: string; profiles: string[] },
+              private readonly config: () => { defaultAgent: string; profiles: string[]; configDir?: string },
               private readonly mcpTools: () => Promise<ToolInfo[]> = async () => [],
               private readonly switchedOff: () => Record<string, string> = () => ({}),
               /** The configured MCP servers' names: their tools may be listed before a server was ever reached. */
@@ -220,7 +222,8 @@ export class AgentCatalog {
       const folder = entry.trim().replace(/^[/\\]+|[/\\]+$/g, "");
       if (!folder || folder.split(/[/\\]/).includes("..")) {
         problems.push({ path: "vault_scope", message: `'${entry}' is not a folder inside the vault` });
-      } else if ([".obsidian", AGENTS_DIR, ".tools"].some((p) => folder === p || folder.startsWith(`${p}/`))) {
+      } else if ([OBSIDIAN_DIR, this.config().configDir ?? OBSIDIAN_DIR, AGENTS_DIR, ".tools"]
+        .some((p) => folder === p || folder.startsWith(`${p}/`))) {
         problems.push({ path: "vault_scope", message: `'${entry}' is not a folder notes live in` });
       } else if (!(await this.vault.isFolder(folder))) {
         problems.push({ path: "vault_scope", message: `there is no folder '${entry}' in the vault` });
@@ -263,7 +266,7 @@ export class AgentCatalog {
       if (problems.length) return { ok: false, error: "the agent would not be valid", fields: problems };
     }
     let { block, prompt } = split(await this.text(agent));
-    if (change.fields) block = mergeFrontmatter(block, change.fields as Record<string, unknown>);
+    if (change.fields) block = mergeFrontmatter(block, change.fields);
     prompt = change.prompt !== undefined ? change.prompt.trim() : prompt.replace(/^\n+|\n+$/g, "");
     const target = agent.source === "bundled" ? `${AGENTS_DIR}/${agent.file}` : agent.path;
     await this.vault.write(target, `${block}\n${prompt}\n`);
@@ -309,6 +312,7 @@ export class AgentCatalog {
       throw new Error(`${name} is built in and cannot be deleted${detail.can_reset ? " — reset drops your copy of it" : ""}`);
     }
     if (detail.is_default) throw new Error(`${name} is the default agent; choose another default first`);
+    // Into the trash Obsidian is set to use: an agent's prompt is work a person wrote (#322)
     await this.vault.remove(detail.path);
   }
 

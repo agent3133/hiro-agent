@@ -7,17 +7,17 @@
  * runtime), drawn from its schema (`config/schema.json`) by `settings/`.
  */
 
-import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, SettingPage, type SettingDefinitionItem } from "obsidian";
 
-import type { ConfigWriteResult } from "./api/types";
+import type { ConfigDocument, ConfigWriteResult } from "./api/types";
 import { messageOf } from "./core/errors";
-import { AgentsEditorState, renderAgents } from "./settings/AgentsTab";
-import { renderFeatures } from "./settings/BasicSections";
-import { renderMcp } from "./settings/McpSection";
+import { AgentsEditorState, renderAgents, type AgentsHost } from "./settings/AgentsTab";
+import { featureGroup } from "./settings/BasicSections";
+import { mcpGroup } from "./settings/McpSection";
 import { BASIC_PATHS } from "./settings/basicPaths";
-import { renderAdvanced } from "./settings/ConfigSections";
-import { group, tabs, type Tab } from "./settings/layout";
-import { renderProfiles, type ProfilesHost } from "./settings/ProfilesSection";
+import { advancedGroups } from "./settings/ConfigSections";
+import { findLocalServers, type LocalServer, type Profiles } from "./settings/connections";
+import { connectionGroup, type ProfilesHost } from "./settings/ProfilesSection";
 import { probe } from "./settings/probe";
 import type ObsidianAgentPlugin from "./main";
 
@@ -47,111 +47,152 @@ export const OBSOLETE_SETTINGS = ["mode", "commandLine", "version", "binaryPath"
                                    "braveSecretId",
                                    "developerTools", "secrets"];
 
-type TabId = "connections" | "features" | "agents" | "advanced";
+/** How long a look for local servers stands before the Connections page looks again. */
+const LOOK_AGAIN_MS = 30_000;
 
-/** In the order setting up meets them: where notes go, what the agent may do, who answers, the rest (#149). */
-const TABS: Tab<TabId>[] = [
-  { id: "connections", label: "Connections" },
-  { id: "features", label: "Features" },
-  { id: "agents", label: "Agents" },
-  { id: "advanced", label: "Advanced" },
-];
-
+/**
+ * The settings as Obsidian 1.13 describes them (#321): a page each for the connections, the features, the agents and
+ * the rest, in the order setting up meets them (#149). Obsidian draws them, and finds each setting in its search.
+ *
+ * The agent's configuration is read once and kept; a change reads it again and describes the settings anew
+ * (`reload`), which redraws the page that is open.
+ */
 export class AgentSettingTab extends PluginSettingTab {
-  /** The tab shown last, so a redraw after a change stays where the user was. */
-  private activeTab: TabId = "connections";
+  /** The agent's configuration as last read; null until the first read is done. */
+  private doc: ConfigDocument | null = null;
+  /** Why the configuration could not be read, when it could not. */
+  private problem = "";
+  /** Local servers no connection points at yet, and when they were looked for. */
+  private found: LocalServer[] = [];
+  private lookedAt = 0;
 
-  /** The Agents tab's editor, kept across redraws and closing the settings (#181). */
+  /** The Agents page's editor, kept across redraws and closing the settings (#181). */
   private readonly agentsState = new AgentsEditorState();
 
   constructor(app: App, private readonly plugin: ObsidianAgentPlugin) {
     super(app, plugin);
+    void this.reload();
   }
 
-  /** Tabs, in the order a person setting the agent up meets them (TABS). */
-  override display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.addClass("obsidian-agent-settings");
-
-    const panes = tabs(containerEl, TABS, this.activeTab, (id) => { this.activeTab = id; });
-    this.displayConfig(panes.connections, panes.features, panes.advanced);
-    this.displayAgents(panes.agents);
-  }
-
-  /** Asked on closing the settings with unsaved agent edits (#149): they are kept until saved or discarded. */
-  override hide(): void {
-    const unsaved = this.agentsState.unsaved();
-    if (unsaved) new UnsavedModal(this.app, unsaved).open();
-    super.hide();
-  }
-
-  /** Switches for testing the plugin itself. */
-  private displayDeveloper(pane: HTMLElement): void {
-    new Setting(group(pane, "Developer"))
-      .setName("Agent tools on the Obsidian CLI")
-      .setDesc("Leave this off unless you are testing the plugin: while it is on, any program on this computer "
-               + "can delete, move or overwrite notes through the Obsidian command line without asking you. It "
-               + "lets `obsidian agent:tool name=… args=…` run one of the agent's tools (destructive ones only with "
-               + "the confirm flag), and `agent:ask … allow=destructive` change notes without the dialog, for "
-               + "unattended runs such as the benchmark. The command-line tool takes effect when the plugin "
-               + "reloads. The switch is kept on this device only: it does not sync with the vault.")
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.developer())
-        .onChange((value) => this.plugin.setDeveloper(value)));
-  }
+  /** Set while a field of these settings saves: the change needs no redraw, which would take the focus away. */
+  private saving = false;
 
   /**
-   * Connections and the rest of the agent's configuration, kept by the plugin for this vault (#86).
-   *
-   * A change is checked against the configuration's schema before it is saved, secrets are masked on the way to
-   * the form, and the next turn uses what was saved — as the runtime did with config.yaml.
+   * Read the agent's configuration again and describe the settings anew; the open page is drawn again. During a save
+   * from these settings it only keeps what was saved, quietly: the field shows it already.
    */
-  private displayConfig(connections: HTMLElement, features: HTMLElement, advanced: HTMLElement): void {
-    const client = this.plugin.backend();
-    const panes = [connections, features, advanced];
-    const loading = panes.map((pane) => pane.createEl("p", {
-      cls: "setting-item-description", text: "Loading the configuration…",
-    }));
+  async reload(): Promise<void> {
+    const quietly = this.saving;
+    try {
+      this.doc = await this.plugin.backend().config();
+      this.problem = "";
+    } catch (error) {
+      this.problem = messageOf(error);
+    }
+    if (!quietly) this.update();
+  }
+
+  override getSettingDefinitions(): SettingDefinitionItem[] {
+    const doc = this.doc;
+    if (!doc) {
+      return [this.problem
+        ? { name: "Could not read the agent's configuration", desc: this.problem }
+        : { name: "Loading the configuration…" }];
+    }
+    const redraw = (): void => void this.reload();
     const host: ProfilesHost = {
       app: this.app,
       save: (values) => this.saveConfig(values),
       probe: (url, headers) => probe(url, headers),
-      redraw: () => this.display(),
+      redraw,
       connectionApproval: (name) => this.plugin.approvalStatus("connection", name),
       keychain: { app: this.app, names: () => this.plugin.keychainNames(), value: (name) => this.plugin.keychainValue(name) },
       approveConnection: (name) => this.plugin.approveOnThisDevice("connection", name),
     };
-    client.config().then((doc) => {
-      for (const line of loading) line.remove();
-      renderProfiles(connections, doc, host);
-      renderFeatures(features, doc, host, host.redraw, {
-        detect: () => client.detectPrograms(),
-        test: (program) => client.testProgram(program),
-        approval: () => this.plugin.approvalStatus("programs"),
-        approve: () => this.plugin.approveOnThisDevice("programs"),
-      });
-      const mcp = this.plugin.mcp();
-      renderMcp(features, {
-        app: this.app,
-        status: () => mcp.status(),
-        test: (name) => mcp.test(name),
-        approve: (name) => mcp.approve(name),
-        revoke: (name) => mcp.revoke(name),
-        save: (values) => this.saveConfig(values),
-        redraw: host.redraw,
-      });
-      renderAdvanced(advanced, doc, host, BASIC_PATHS);
-      this.displayDeveloper(advanced);
-    }).catch((error: Error) => {
-      for (const line of loading) line.setText(`Could not read the agent's configuration: ${error.message}`);
-    });
+    const client = this.plugin.backend();
+    const mcp = this.plugin.mcp();
+    return [
+      {
+        type: "page", name: "Connections",
+        desc: "Where the agent sends your notes. A cloud connection sends what the agent reads to that provider.",
+        items: [connectionGroup(doc, host, this.found, () => this.lookForServers(doc))],
+      },
+      {
+        type: "page", name: "Features",
+        desc: "What the agent may do: web pages, undo, memory, audio transcription, MCP servers. A change applies "
+              + "from the next message.",
+        items: [
+          featureGroup(doc, host, redraw, {
+            detect: () => client.detectPrograms(),
+            test: (program) => client.testProgram(program),
+            approval: () => this.plugin.approvalStatus("programs"),
+            approve: () => this.plugin.approveOnThisDevice("programs"),
+          }),
+          mcpGroup({
+            app: this.app,
+            status: () => mcp.status(),
+            test: (name) => mcp.test(name),
+            approve: (name) => mcp.approve(name),
+            revoke: (name) => mcp.revoke(name),
+            save: (values) => this.saveConfig(values),
+            redraw,
+          }),
+        ],
+      },
+      {
+        type: "page", name: "Agents",
+        desc: "The default agent, and each agent's prompt, tools, folders and connection.",
+        page: () => new AgentsPage(this.app, this.agentsHost()),
+      },
+      {
+        type: "page", name: "Advanced",
+        desc: `Everything else in ${doc.path}. An empty field uses the default.`,
+        items: [...advancedGroups(doc, host, BASIC_PATHS), this.developerGroup()],
+      },
+    ];
   }
 
-  /** The Agents tab: the built-in agents and the vault's `.agents/`, kept by the plugin (#86). */
-  private displayAgents(pane: HTMLElement): void {
+  /**
+   * Look for llama.cpp, Ollama and the like on this machine while the Connections page is drawn — not at startup,
+   * and not again within half a minute — and list what answers once it has.
+   */
+  private lookForServers(doc: ConfigDocument): void {
+    if (Date.now() - this.lookedAt < LOOK_AGAIN_MS) return;
+    this.lookedAt = Date.now();
+    const profiles = (doc.values.llm_profiles ?? {}) as Profiles;
+    void findLocalServers(profiles, (url) => probe(url)).then((found) => {
+      if (JSON.stringify(found) === JSON.stringify(this.found)) return;
+      this.found = found;
+      this.update();
+    }).catch(() => undefined);
+  }
+
+  /** Switches for testing the plugin itself. */
+  private developerGroup(): SettingDefinitionItem {
+    return {
+      type: "group", heading: "Developer",
+      items: [{
+        name: "Agent tools on the Obsidian CLI",
+        desc: "Leave this off unless you are testing the plugin: while it is on, any program on this computer can "
+              + "delete, move or overwrite notes through the Obsidian command line without asking you. It lets "
+              + "`obsidian agent:tool name=… args=…` run one of the agent's tools (destructive ones only with the "
+              + "confirm flag), and `agent:ask … allow=destructive` change notes without the dialog, for unattended "
+              + "runs such as the benchmark. The command-line tool takes effect when the plugin reloads. The switch "
+              + "is kept on this device only: it does not sync with the vault.",
+        aliases: ["developer"],
+        render: (setting) => {
+          setting.addToggle((toggle) => toggle
+            .setValue(this.plugin.developer())
+            .onChange((value) => this.plugin.setDeveloper(value)));
+        },
+      }],
+    };
+  }
+
+  /** What the Agents page needs: the built-in agents and the vault's `.agents/`, kept by the plugin (#86). */
+  private agentsHost(): Omit<AgentsHost, "redraw"> {
     const client = this.plugin.backend();
-    void renderAgents(pane, {
+    return {
       app: this.app,
       state: this.agentsState,
       client,
@@ -165,12 +206,12 @@ export class AgentSettingTab extends PluginSettingTab {
         return true;
       },
       preview: (name, draft) => this.plugin.promptAsSent(name, draft),
-      redraw: () => this.display(),
-    });
+    };
   }
 
   private async saveConfig(values: Record<string, unknown>): Promise<ConfigWriteResult | null> {
     const client = this.plugin.backend();
+    this.saving = true;
     try {
       const result = await client.putConfig(values);
       if (result.ok && result.changed.length) await this.plugin.configChanged();
@@ -178,7 +219,32 @@ export class AgentSettingTab extends PluginSettingTab {
     } catch (error) {
       new Notice(`Not saved: ${messageOf(error)}`, 10_000);
       return null;
+    } finally {
+      this.saving = false;
     }
+  }
+}
+
+/**
+ * The Agents page: the editor draws itself (`renderAgents`), with its picker, unsaved edits and tool switches, which
+ * definitions cannot describe. Leaving it with unsaved edits asks what to do with them (#149).
+ */
+class AgentsPage extends SettingPage {
+  constructor(private readonly app: App, private readonly host: Omit<AgentsHost, "redraw">) {
+    super();
+    this.title = "Agents";
+  }
+
+  override display(): void {
+    this.containerEl.empty();
+    this.containerEl.addClass("obsidian-agent-settings");
+    void renderAgents(this.containerEl, { ...this.host, redraw: () => this.display() });
+  }
+
+  override hide(): void {
+    const unsaved = this.host.state.unsaved();
+    if (unsaved) new UnsavedModal(this.app, unsaved).open();
+    super.hide();
   }
 }
 
@@ -191,10 +257,10 @@ class UnsavedModal extends Modal {
   override onOpen(): void {
     this.setTitle(`Save the changes to ${this.unsaved.name}?`);
     this.contentEl.createEl("p", { text: "You changed this agent in the settings and did not save. Kept for later, "
-                                         + "the changes wait in the Agents tab until Obsidian closes." });
+                                         + "the changes wait on the Agents page until Obsidian closes." });
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText("Keep for later").onClick(() => this.close()))
-      .addButton((button) => button.setButtonText("Discard").setWarning().onClick(() => {
+      .addButton((button) => button.setButtonText("Discard").setDestructive().onClick(() => {
         this.unsaved.discard();
         this.close();
       }))

@@ -91,8 +91,9 @@ describe("agent:ask, the turn", () => {
     made.handlers().onDone("Summary.", false, { tool_calls: 2 }, { turn: "t1", files: ["Notes/a.md"] }, 0);
     const result = await answer;
     expect(result).toMatchObject({ ok: true, reply: "Summary.", agent: "assistant", connection: "cloud",
-                                   session: "2026-09-29-1200-do-it", tool_calls: 2, changed: ["Notes/a.md"], stopped: false });
-    expect(askText(result).startsWith("Summary.\n\n[changed: Notes/a.md]\n[assistant on cloud · 2 tool calls · ")).toBe(true);
+                                   session: "2026-09-29-1200-do-it", tool_calls: 2, changed: ["Notes/a.md"], turn: "t1", stopped: false });
+    expect(askText(result).startsWith("Summary.\n\n[changed: Notes/a.md]\n[undo: obsidian agent:undo turn=t1]\n"
+                                      + "[assistant on cloud · 2 tool calls · ")).toBe(true);
     expect(made.notices[0]).toContain("a request from the terminal is running (assistant)");
     expect(made.notices[0]).toContain("Ctrl+C in the terminal does not stop it");
     expect(made.notices[1]).toContain('is done — saved as "2026-09-29-1200-do-it"');

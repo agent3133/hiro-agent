@@ -10,10 +10,13 @@ what is selected in it. The selection stays highlighted in the note while you ty
 the input says what goes along. A destructive tool — `update_note`, `delete_note`, `move_note` — opens a dialog naming
 the note it will touch; dismissing it means no. `move_note` and `delete_note` also move and delete attachments
 (images, PDFs, …), their embeds following a move; undo does not cover those, so move one back to undo a move, and
-restore a deleted one from the trash. Text in the chat can be selected and copied with Ctrl+C, or with **Copy** in
+restore a deleted one from the trash. What the agent deletes goes where Obsidian is set to put deleted files
+(Settings → Files and links → Deleted files): the system trash, the vault's `.trash` folder, or gone for good. Text in the chat can be selected and copied with Ctrl+C, or with **Copy** in
 the right-click menu; the copy button under an answer copies all of it.
 
-**Hiro Agent: New chat window** opens another chat beside the first, with a conversation of its own. The commands
+Another chat beside the first, with a conversation of its own, opens from the chat's **⋯** menu (*Open a new chat
+window*), with Ctrl-click (Cmd-click on a Mac) on the ribbon icon, or with **Hiro Agent: New chat window**. Holding
+Ctrl/Cmd while picking a conversation in the header opens it in another chat and leaves this one as it is. The commands
 and the context meter in the status bar follow the chat you used last; picking a conversation that is open in
 another chat switches to that chat. Answers still come one at a time: a message sent in one chat while the other is
 answering waits for it.
@@ -45,6 +48,13 @@ that still hold what the agent wrote, so anything you edited since is named and 
 the last 20 turns while Obsidian runs, so reloading the plugin clears it. It records what the agent's tools
 wrote, moved or deleted — including the links Obsidian rewrote on a move — but not what an MCP server did.
 
+**Going back to an earlier message:** each of your messages has a clock button at its top right (*Go back
+to before this message*). It removes that message and everything after it from the conversation — from its note too,
+when it is kept — and takes back what those answers changed in the vault, newest first, after showing all of it as
+one diff. The message goes back into the input box, to send again or change. As with undo, a file edited since is
+named and left alone, and an answer from before Obsidian started the plugin cannot be taken back. It does not go back
+past a summary of the conversation: those exchanges are only in the summary now.
+
 Conversations are kept. The first turn names one after what you asked (`2026-09-23 1432 move-ideas-to-archive`)
 and the plugin writes it to `<vault>/.sessions/`; the picker beside the agent picker reopens any of them, and
 the view comes back to whichever you had open. The picker shows each conversation's title — what you called it — or
@@ -75,8 +85,9 @@ tool calls, folded, each with its arguments and the first 500 characters of its 
 conversation shows them in the chat again. The model never gets them back; what it remembers of a conversation is
 the same either way.
 
-The trash icon deletes the open conversation's note. It asks first, there is no undo, and notes the agent
-changed are not touched — only the transcript goes.
+The trash icon deletes the open conversation's note. It asks first, and the note goes where Obsidian keeps
+deleted files, so it can be restored from there; notes the agent changed are not touched — only the transcript
+goes. Deleting or resetting an agent in the settings sends its file there too.
 
 One answer can read a lot — every note in a folder, say — and all of it goes along with each further step of that
 answer. So before each step the plugin checks the size of what it is about to send:
@@ -108,10 +119,11 @@ without end.
 
 In Obsidian's status bar, beside the backlinks count, a small bar shows how much of the model's context window the
 conversation takes after each answer: "≈ 12.3k of 32.8k tokens · 38%" — what the next message carries, your
-messages and the agent's answers, estimated from their length. It grows as the conversation does, turns orange from
-50 % and red from 80 %, and drops when the conversation is summarised at 60 %. The notes and pages the agent read
-while answering are not kept after the answer, so they are not in the bar; the tooltip says how far the last
-answer went with them. The window is the one the server says it has, or the connection's *context window* setting
+messages and the agent's answers, estimated from their length. A chat in a window of its own has no status bar, so
+there the bar is above the input. It grows as the conversation does, turns orange
+from 50 % and red from 80 %, and drops when the conversation is summarised at 60 %. While an answer runs, the bar
+follows each request to the model, with the notes and pages the agent read; those are not kept after the answer, so
+the bar drops back when it is done, and the tooltip says how far the answer went with them. The window is the one the server says it has, or the connection's *context window* setting
 for a cloud API.
 
 The agent answers through whatever endpoint the default connection (Settings → Connections) points at, so start
@@ -137,7 +149,7 @@ None has a hotkey by default; assign one under Settings → Hotkeys.
 
 ## From the terminal
 
-With Obsidian 1.12.2 or later running, the Obsidian CLI reaches the agent as `obsidian agent:<action>`:
+With Obsidian running, the Obsidian CLI reaches the agent as `obsidian agent:<action>`:
 
 ```bash
 obsidian agent:status                 # version, default agent and connection, MCP servers
@@ -148,6 +160,10 @@ obsidian agent:list format=json       # any of them as JSON, for scripts
 obsidian agent:ask prompt="What is due this week?"
 obsidian agent:ask prompt="Summarise this" note=Projects/Plan.md agent=research connection=cloud
 obsidian agent:ask prompt="Tidy the inbox" allow=destructive timeout=900 format=json
+
+obsidian agent:undo list                  # the answers that can be undone, newest first
+obsidian agent:undo turn=3f9a0c1d2e4b dry # what undo would take back, changing nothing
+obsidian agent:undo turn=3f9a0c1d2e4b     # take it back; without turn=, the newest answer not undone
 ```
 
 `agent:ask` runs one turn and prints the reply when it ends — nothing shows meanwhile. Each call is a new
@@ -161,6 +177,11 @@ selected in that note, as the chat does.
 - **Deleting, moving or overwriting a note is refused** unless the call says `allow=destructive`; then the usual
   dialog asks in the Obsidian window while the terminal waits. With Settings → Hiro Agent → Advanced → *Developer* on,
   `allow=destructive` runs them without asking — for unattended runs such as the benchmark.
+- **Undo from the terminal** (`agent:undo`): an answer that changed files ends with
+  `[undo: obsidian agent:undo turn=<id>]`. Undo works as the chat's button does, on the same journal: files edited
+  since are named and left alone, and an answer undone in the chat is undone here too. Without `turn=` it takes back
+  the newest answer not undone yet, from the chat or the terminal. The journal holds the last 20 answers while
+  Obsidian runs.
 - **Keep the Obsidian window open, not minimized**: while it is minimized, Obsidian does not finish moving a note
   and updating the links to it, so `move_note` refuses and says so.
 
@@ -197,12 +218,14 @@ Before 0.9.1 a **Secrets** tab bound names such as `${OPENAI_API_KEY}` to keycha
 
 ## Settings
 
-Most of the tab is the agent's own configuration, kept in this plugin's settings for this vault; a vault
+Most of the settings are the agent's own configuration, kept in this plugin's settings for this vault; a vault
 without any starts from the defaults. Each change is checked against the schema before saving;
 a stored value shows a short *Saved* beside the field, and a refused one its reason there and in a notice. Lists
 save as you type. A change applies from the next message, in open conversations too.
 
-Four tabs, in the order setting up meets them:
+Four pages, in the order setting up meets them. Each opens from its entry, with a back arrow, as Obsidian's own
+settings do, and Obsidian's settings search (*Search settings…* at the top of the list) finds every setting on them
+by its name or description — "reasoning effort", "whisper", "default agent" — and leads to the page it is on:
 
 - **Connections** — where the agent sends your notes. Each connection's row says what it is (model, address,
   key), with *Test*, the pencil and the bin. *Add connection* opens one form: a name, the address (empty for
@@ -211,7 +234,7 @@ Four tabs, in the order setting up meets them:
   server speaks the same API, and the plugin finds out from the address whether llama.cpp, Ollama, LM Studio or vLLM
   answers there, which tells it the loaded model and the context window. The row names what it found. An address
   without a path (`http://127.0.0.1:11434`) gets `/v1` added. Sampling, context window, output
-  length, reasoning effort and service tier are folded under *More for …* on each row. *Reasoning effort* tells
+  length, reasoning effort, service tier and API are on a page of their own under each row, *More for …*. *Reasoning effort* tells
   an OpenAI reasoning model how much to think — less is faster and cheaper; left empty, nothing is sent. For a
   llama.cpp model, *Enable thinking* does that instead. *Service tier* is OpenAI's: **flex** costs
   about half and answers more slowly, **priority** answers faster at a higher price; left empty, nothing is sent.
@@ -223,8 +246,8 @@ Four tabs, in the order setting up meets them:
   with each tool result, and the thinking shown is OpenAI's summary of it. A server answering on this computer's usual ports — llama.cpp
   8080 and 8090, vLLM 8000, LM Studio 1234, Ollama 11434 — is offered with one click. A connection whose key and address came from another device says so, and *Approve*
   asks in a dialog where the key would go.
-- **Features** — switches for web pages, undo, memory and audio transcription; each one's own settings are folded
-  under it while it is on (*More for …*). See below.
+- **Features** — switches for web pages, undo, memory and audio transcription; each one's own settings are on a
+  page of its own under it while it is on (*More for …*). See below.
 - **Agents** — the *Default agent*, and an editor for any *Agent*: pick it at the top (with *New*, *Duplicate*,
   *Delete* or *Reset*), then its description and prompt, the **folders** it may work in, and its **tools** — one
   switch per group, unfolding to single tools. Connection, step limit and model settings are folded under *More*.
@@ -238,8 +261,8 @@ Four tabs, in the order setting up meets them:
     cannot.
   - MCP tools appear in one *MCP* group, as "server: tool", with *All MCP tools* (`mcp:*`) first, once the
     server has been listed on this device — by its *Test* under Features, or by an answer that used it. Opening
-    the tab starts no server. Switching one tool off while *All MCP tools* is on lists the others by name. There are no shell tools and no `git`: the plugin has no tool that runs a shell.
-- **Features** (details) — once audio is on, it shows the paths it needs — whisper.cpp, its model, and ffmpeg. Each program's path says which file it runs;
+    the page starts no server. Switching one tool off while *All MCP tools* is on lists the others by name. There are no shell tools and no `git`: the plugin has no tool that runs a shell.
+- **Features** (details) — once audio is on, its page shows the paths it needs — whisper.cpp, its model, and ffmpeg. Each program's path says which file it runs;
   when the one set is not found but one is on PATH, *Use it* takes that one. *Test* runs the program once and
   says whether it works. There is no web search of its own: add a search engine's MCP server for that.
   - **MCP servers** — add, edit, switch on and off, remove, and *Test* (connect and list the tools). A `stdio`
@@ -252,7 +275,7 @@ Four tabs, in the order setting up meets them:
     A server is started on first use and kept while Obsidian runs; every start is in the plugin's log.
 - **Advanced** — *Developer* (kept on this device only; it does not sync), for testing the plugin: it switches on
   `obsidian agent:tool`, which runs one of the agent's tools from the command line, and lets `agent:ask` change
-  notes without the dialog. Leave it off otherwise. Any setting no other tab shows would appear here too.
+  notes without the dialog. Leave it off otherwise. Any setting no other page shows would appear here too.
 
 A connection's API key is picked from Obsidian's keychain; nowhere does a setting take the key itself — see
 [Keys](#keys).

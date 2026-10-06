@@ -187,9 +187,16 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
       const normalized = normalizePath(path);
       const previous = await before(normalized);
       const file = app.vault.getAbstractFileByPath(normalized);
-      if (file instanceof TFile) await app.vault.delete(file, true);
-      // Not in the index: a file in a dot folder
-      else if (await adapter.exists(normalized)) await adapter.remove(normalized);
+      // Where deleted files go is the user's choice (Settings → Files and links → Deleted files), which Obsidian's
+      // own trash follows (#322) — for an undone note, a conversation and an agent alike. A file in a dot folder
+      // (.sessions/, .agents/) is not in its index: the same choice, by hand
+      if (file instanceof TFile) {
+        await app.fileManager.trashFile(file);
+      } else if (await adapter.exists(normalized)) {
+        const option = (app.vault as unknown as { getConfig?(key: string): unknown }).getConfig?.("trashOption");
+        if (option === "none") await adapter.remove(normalized);
+        else if (option === "local" || !(await adapter.trashSystem(normalized))) await adapter.trashLocal(normalized);
+      }
       record()?.({ op: "delete", path: normalized, before: previous, after: null });
     },
     move: async (from, to) => {

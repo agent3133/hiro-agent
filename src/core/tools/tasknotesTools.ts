@@ -10,12 +10,12 @@
  */
 
 import { readFrontmatter, setFrontmatter } from "../frontmatter";
-import { basename } from "../paths";
+import { basename, OBSIDIAN_DIR } from "../paths";
 import { vaultNotes, type VaultPort } from "../vault";
 import { defineTool, type Tool } from "./tool";
 
 /** Where TaskNotes keeps its settings, in the vault's config folder — `.obsidian` unless renamed (#164). */
-export const settingsPath = (configDir = ".obsidian"): string => `${configDir}/plugins/tasknotes/data.json`;
+export const settingsPath = (configDir = OBSIDIAN_DIR): string => `${configDir}/plugins/tasknotes/data.json`;
 /** Rows per listing: a vault with a hundred tasks answers "list them" with a wall models give up on. */
 export const TASK_LIST_LIMIT = 30;
 
@@ -27,7 +27,7 @@ export class TaskNotesSettings {
   completedStatuses: string[] = ["done"];
   fields: Record<string, string> = {};
 
-  static async read(vault: VaultPort, configDir = ".obsidian"): Promise<TaskNotesSettings> {
+  static async read(vault: VaultPort, configDir = OBSIDIAN_DIR): Promise<TaskNotesSettings> {
     const settings = new TaskNotesSettings();
     let data: Record<string, unknown>;
     try {
@@ -35,7 +35,7 @@ export class TaskNotesSettings {
     } catch {
       return settings; // no plugin settings: the defaults are what TaskNotes ships with
     }
-    const text = (key: string): string => (typeof data[key] === "string" ? data[key] as string : "");
+    const text = (key: string): string => (typeof data[key] === "string" ? data[key] : "");
     settings.folder = text("tasksFolder") || settings.folder;
     settings.archive = text("archiveFolder") || settings.archive;
     settings.tag = text("taskTag") || settings.tag;
@@ -93,7 +93,7 @@ function today(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = null, configDir = ".obsidian"): Tool[] {
+export function makeTaskNotesTools(vault: VaultPort, scope: string[] | null = null, configDir = OBSIDIAN_DIR): Tool[] {
   interface TaskNote { rel: string; meta: Record<string, unknown> }
 
   const taskNotes = async (settings: TaskNotesSettings): Promise<TaskNote[]> => {

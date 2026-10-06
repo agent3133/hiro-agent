@@ -109,7 +109,7 @@ const now = new Date();
 const TODAY = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 function cleanUp(): void {
   for (const path of [ALPHA, BETA, GAMMA, NAMESAKE, LONELY, LONELY_NAMESAKE, LONELY_MOVED, TEMPLATE, FROM_TEMPLATE, EMBEDS]) {
-    confirmed("delete_note", { path, permanent: true });
+    confirmed("delete_note", { path });
   }
 }
 
@@ -222,7 +222,7 @@ try {
     // Narrowed to its project: a vault with more than 30 tasks cuts a plain listing short
     const listed = tool("list_tasknotes", { status: "all", project: "Agent smoke" });
     check("…and list_tasknotes finds the task note TaskNotes filed", listed.startsWith(`${taskPath} — status:`), listed);
-    confirmed("delete_note", { path: taskPath, permanent: true });
+    confirmed("delete_note", { path: taskPath });
   }
   check("a scoped agent has no create_tasknote", tool("create_tasknote", { title: "x" }, ["scope=Elsewhere"])
         === "Error: no tool 'create_tasknote'");
@@ -283,8 +283,10 @@ try {
           && movedImage.includes("Undo does not cover attachments"), movedImage);
     check("…and the embed follows it", tool("read_note", { path: EMBEDS }).includes("![[dot.png]]")
           || tool("read_note", { path: EMBEDS }).includes("Images/dot.png"), tool("read_note", { path: EMBEDS }));
-    const trashed = confirmed("delete_note", { path: `${DIR}/Images/dot.png`, permanent: true });
-    check("delete_note deletes an attachment", trashed.startsWith(`Deleted attachment at '${DIR}/Images/dot.png' permanently`), trashed);
+    // Where it goes is the vault's setting (#322): the answer names the trash, or says it is gone
+    const trashed = confirmed("delete_note", { path: `${DIR}/Images/dot.png` });
+    check("delete_note deletes an attachment, where the vault keeps deleted files",
+          /^(Moved attachment '|Deleted attachment at ')/.test(trashed) && trashed.includes(`${DIR}/Images/dot.png`), trashed);
     for (const name of Object.keys(ATTACHMENTS)) rmSync(join(vaultPath, DIR, name), { force: true });
 
     // Bases (#230): a .base file by its name, and a definition whose `this.file` is the note named
@@ -335,8 +337,8 @@ try {
               /^Video '.+clip\.mp4' — \d+ frame\(s\) sampled at [\d.]+ fps:/.test(clip) && clip.includes("[image]")
               && clip.includes("Transcript of 'clip.mp4'"), clip.slice(0, 300));
       }
-      confirmed("delete_note", { path: `${DIR}/Memo.md`, permanent: true });
-      confirmed("delete_note", { path: `${DIR}/clip.mp4.transcript.md`, permanent: true });
+      confirmed("delete_note", { path: `${DIR}/Memo.md` });
+      confirmed("delete_note", { path: `${DIR}/clip.mp4.transcript.md` });
     } else {
       console.log("      (ffmpeg is not on PATH: recordings not checked)");
     }

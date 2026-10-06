@@ -1,22 +1,24 @@
 /**
- * Drawing config fields, and the generated "Advanced" part of the settings tab.
+ * Config fields as settings, and the generated "Advanced" page of the settings.
  *
- * The first tabs show a few chosen settings (see `BasicSections.ts`); everything else in `config.yaml` is
- * generated here from the runtime's schema, on the Advanced tab. Generating it keeps a field added in Python
- * reachable without any TypeScript; its own tab keeps it from being the first thing anyone sees.
+ * The first pages show a few chosen settings (see `BasicSections.ts`); everything else in the agent's configuration
+ * is generated here from its schema, on the Advanced page. Generating it keeps a field added to the schema reachable
+ * without any more code; its own page keeps it from being the first thing anyone sees.
+ *
+ * Each field is a setting definition (#321, Obsidian 1.13): Obsidian draws its row, lists it in its settings search
+ * by name, description and config key, and `fillField` adds the control.
  *
  * Each field saves on its own when it loses focus — not per keystroke, which would write the file and reload
  * the runtime's config once per character. A refused value keeps the runtime's own message next to the field,
  * and a change the running process cannot apply says so.
  */
 
-import { Notice, Setting } from "obsidian";
+import { Notice, Setting, type SettingDefinitionGroup, type SettingDefinitionRender } from "obsidian";
 
 import type { ConfigDocument, ConfigWriteResult } from "../api/types";
 import {
   acceptsSecret, buildSection, display, isEmpty, nest, parseInput, type ConfigField, type ConfigSection,
 } from "./schemaForm";
-import { group } from "./layout";
 
 export interface ConfigHost {
   /** Send a partial change; null when it could not be saved (already reported to the user). */
@@ -42,32 +44,33 @@ const TITLES: Record<string, string> = {
  */
 const NEVER = ["llm_profiles", "default_llm_profile", "mcp_servers", "vault.path"];
 
-/** Everything not already shown on the other tabs, one card per block. `shown` holds those fields' paths. */
-export function renderAdvanced(pane: HTMLElement, doc: ConfigDocument, host: ConfigHost, shown: string[]): void {
+/** Everything not already shown on the other pages, one group per block. `shown` holds those fields' paths. */
+export function advancedGroups(doc: ConfigDocument, host: ConfigHost, shown: string[]): SettingDefinitionGroup[] {
   const root = buildSection(doc.schema, doc.schema, doc.values, [], new Set([...NEVER, ...shown]));
-  group(pane, undefined, `Everything else in ${doc.path}. An empty field uses the default.`);
-  for (const section of root.sections) renderSection(pane, section, host);
+  const groups: SettingDefinitionGroup[] = [];
+  for (const section of root.sections) sectionGroups(groups, section, host);
+  return groups;
 }
 
 /**
- * A block of the config as a card, and each nested block as its own card after it ("External tools · Shell"),
- * since a card inside a card reads as a mistake.
+ * A block of the config as a group, and each nested block as its own group after it ("External tools · Shell"),
+ * since a group inside a group reads as a mistake.
  */
-export function renderSection(pane: HTMLElement, section: ConfigSection, host: ConfigHost, parent?: string): void {
+function sectionGroups(groups: SettingDefinitionGroup[], section: ConfigSection, host: ConfigHost,
+                       parent?: string): void {
   if (isEmpty(section)) return;
   const key = section.path[section.path.length - 1];
   const title = parent ? `${parent} · ${section.title}` : TITLES[key] ?? section.title;
   if (section.fields.length || section.maps.length) {
-    const list = group(pane, title);
-    for (const field of section.fields) renderField(list, field, host);
-    for (const map of section.maps) {
-      list.createEl("p", {
-        cls: "setting-item-description",
-        text: `${map}: a list of named entries this tab does not draw yet.`,
-      });
-    }
+    groups.push({
+      type: "group", heading: title,
+      items: [
+        ...section.fields.map((field) => fieldItem(field, host)),
+        ...section.maps.map((map) => ({ name: map, desc: "A list of named entries these settings do not draw yet." })),
+      ],
+    });
   }
-  for (const child of section.sections) renderSection(pane, child, host, title);
+  for (const child of section.sections) sectionGroups(groups, child, host, title);
 }
 
 export interface FieldOptions {
@@ -77,9 +80,28 @@ export interface FieldOptions {
   onSaved?: () => void;
 }
 
+/**
+ * *field* as a setting definition: Obsidian draws the row and finds it in its search — by its name, its
+ * description, and its config key, for whoever knows the key from the documentation.
+ */
+export function fieldItem(field: ConfigField, host: ConfigHost, options: FieldOptions = {}): SettingDefinitionRender {
+  return {
+    name: options.label ?? field.label,
+    desc: describe(field),
+    aliases: [field.path.join(".")],
+    render: (setting) => { fillField(setting, field, host, options); },
+  };
+}
+
+/** A field as a row of its own in *container*, for the dialogs that are not settings pages. */
 export function renderField(container: HTMLElement, field: ConfigField, host: ConfigHost,
                             options: FieldOptions = {}): Setting {
-  const setting = new Setting(container).setName(options.label ?? field.label);
+  return fillField(new Setting(container), field, host, options);
+}
+
+/** The control for *field* in *setting*'s row, saving each change on its own. */
+export function fillField(setting: Setting, field: ConfigField, host: ConfigHost, options: FieldOptions = {}): Setting {
+  setting.setName(options.label ?? field.label);
   const baseDesc = describe(field);
   setting.setDesc(baseDesc);
   setting.nameEl.title = field.path.join(".");  // where it lives in config.yaml, for whoever wants to know
@@ -178,7 +200,7 @@ export function renderField(container: HTMLElement, field: ConfigField, host: Co
   return setting;
 }
 
-function describe(field: ConfigField): string {
+export function describe(field: ConfigField): string {
   if (field.help) return field.help;
   if (field.secret) return "The name of a keychain entry, as ${openai-api-key}, never the key itself.";
   return "";

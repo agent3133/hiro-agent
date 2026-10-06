@@ -106,7 +106,7 @@ export class ConfigStore {
       exists: true,
       values: maskSecrets(raw) as Values,
       secrets: secretFlags(raw),
-      schema: SCHEMA as ConfigDocument["schema"],
+      schema: SCHEMA,
     };
   }
 

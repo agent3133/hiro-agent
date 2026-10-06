@@ -22,7 +22,11 @@
 }
 
 .obsidian-agent-message { border-radius: var(--radius-m); padding: var(--size-4-2) var(--size-4-3); }
-.obsidian-agent-message.mod-user { background: var(--background-modifier-hover); }
+.obsidian-agent-message.mod-user { background: var(--background-modifier-hover); position: relative; }
+/* Back to before this message (#303): always shown, muted until pointed at; the text keeps clear of it */
+.obsidian-agent-message.mod-user { padding-right: var(--size-4-9); }
+.obsidian-agent-rewind { position: absolute; top: var(--size-4-1); right: var(--size-4-1); color: var(--text-faint); }
+.obsidian-agent-rewind:hover, .obsidian-agent-rewind:focus-visible { color: var(--text-normal); }
 .obsidian-agent-message.mod-system { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 0; }
 .obsidian-agent-message.mod-agent { background: var(--background-primary-alt); }
 
@@ -182,66 +186,9 @@
   font-size: var(--font-ui-smaller);
 }
 
-/* Settings: one collapsible block per section of config.yaml */
-.obsidian-agent-config-section {
-  border-top: 1px solid var(--background-modifier-border);
-  padding: var(--size-4-2) 0;
-}
-
-.obsidian-agent-config-section > summary {
-  cursor: pointer;
-  font-weight: var(--font-semibold);
-}
-
-.obsidian-agent-config-section .setting-item-description.mod-warning {
-  color: var(--text-error);
-}
-
-/* Settings: tabs across the top, as TaskNotes and others do */
-.obsidian-agent-tabs {
-  display: flex;
-  gap: var(--size-4-1);
-  margin-bottom: var(--size-4-4);
-  padding-bottom: var(--size-4-2);
-  border-bottom: 1px solid var(--background-modifier-border);
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-.obsidian-agent-tab {
-  flex-shrink: 0;
-}
-
-.obsidian-agent-tab.is-active {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-}
-
-.obsidian-agent-pane {
-  display: none;
-}
-
-.obsidian-agent-pane.is-active {
-  display: block;
-}
-
 /* Indented like the card's rows (20px each side), not flush with its edge */
 .obsidian-agent-card-intro {
   padding: var(--size-4-3) var(--size-4-5) var(--size-4-1);
-}
-
-/* A connection's sampling and limits, folded under its row (#149) */
-.obsidian-agent-connection-more,
-.obsidian-agent-nested {
-  padding-left: var(--size-4-6);
-}
-
-.obsidian-agent-connection-more > summary,
-.obsidian-agent-feature-more > summary {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  cursor: pointer;
-  padding: var(--size-4-1) 0;
 }
 
 /* What a connection's test said, in the connection form */
@@ -267,6 +214,8 @@
   display: none;
 }
 
+/* A refused value, or what keeps a connection or a server from being used, on any page of the settings (#321) */
+.mod-settings .setting-item-description.mod-warning,
 .obsidian-agent-settings .setting-item-description.mod-warning {
   color: var(--text-error);
 }
@@ -379,6 +328,18 @@
 }
 
 .obsidian-agent-context.is-hidden {
+  display: none;
+}
+
+/* The same meter in the chat, above the input, for a chat in a window of its own, which has no status bar */
+.obsidian-agent-chat-meter {
+  align-self: flex-end;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 0 var(--size-4-1);
+}
+
+.obsidian-agent-chat-meter.is-under-status-bar {
   display: none;
 }
 

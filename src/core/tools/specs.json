@@ -132,16 +132,12 @@
   },
   {
     "name": "delete_note",
-    "description": "Delete a note or attachment (destructive). By default it moves to the vault's .trash folder and can be restored;\npermanent=true removes it for good.",
+    "description": "Delete a note or attachment (destructive). It goes where Obsidian is set to put deleted files: the vault's .trash folder, the system trash, or gone for good; the answer says which.",
     "parameters": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string"
-        },
-        "permanent": {
-          "default": false,
-          "type": "boolean"
         }
       },
       "required": [

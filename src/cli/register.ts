@@ -10,12 +10,14 @@ import type { SessionSummary } from "../core/sessions";
 import { ask, DEFAULT_TIMEOUT_SECONDS, renderAsk, type AskHost } from "./ask";
 import { agentsJson, agentsText, sessionsJson, sessionsText } from "./lists";
 import { renderStatus, type AgentStatus } from "./status";
+import { undo, type UndoHost } from "./undo";
 
 export interface CliHost {
   status(): AgentStatus;
   agents(): Promise<AgentSummary[]>;
   sessions(): Promise<SessionSummary[]>;
   ask: AskHost;
+  undo: UndoHost;
 }
 
 const FORMAT: CliFlags = { format: { value: "<text|json>", description: "json for scripts; text by default" } };
@@ -44,4 +46,10 @@ export function registerCli(plugin: Plugin, host: CliHost): void {
     format: { value: "<text|json>", description: "json for scripts; text by default" },
     keep: { value: "<true|false>", description: "false: do not save the conversation (default true)" },
   }, async (params) => renderAsk(await ask(host.ask, params), params.format));
+  register(plugin, "agent:undo", "Take back what an answer changed, as the chat's undo button does (#302)", {
+    turn: { value: "<id>", description: "The answer, as agent:ask prints it; the newest one not undone when not given" },
+    list: { description: "List the answers that can be undone, newest first" },
+    dry: { description: "Show what would be undone, and change nothing" },
+    format: { value: "<text|json>", description: "json for scripts; text by default" },
+  }, (params) => undo(host.undo, params));
 }

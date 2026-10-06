@@ -42,3 +42,13 @@ export function sessionLabels(sessions: { name: string; title?: string; exchange
   }
   return labels;
 }
+
+/**
+ * The conversations the picker lists, newest first: the vault's notes, and the one open in this chat even before its
+ * note is written — its first answer still running (2026-10-06). Listing only the notes, a refresh in that moment left
+ * the picker blank on the conversation you were in.
+ */
+export function listedSessions<T extends { name: string }>(notes: T[], open: string, made: (name: string) => T): T[] {
+  if (!open || notes.some((session) => session.name === open)) return notes;
+  return [made(open), ...notes];
+}

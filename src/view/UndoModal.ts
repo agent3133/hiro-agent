@@ -50,7 +50,7 @@ export class UndoModal extends Modal {
       .addButton((button) => button.setButtonText("Keep").onClick(() => this.close()))
       .addButton((button) => {
         this.undoButton = button.buttonEl;
-        button.setButtonText("Take it back").setWarning().onClick(() => void this.undo(button.buttonEl));
+        button.setButtonText("Take it back").setDestructive().onClick(() => void this.undo(button.buttonEl));
       });
   }
 
@@ -115,7 +115,7 @@ export function describeUndo(result: { restored: string[]; refused: { path: stri
  * *diff* into *el*: one section per file, named with what happened to it, its lines coloured by kind — added green,
  * removed red, context muted — in the theme's colours, the hunk headers as quiet separators (#131).
  */
-function renderDiff(el: HTMLElement, diff: string): void {
+export function renderDiff(el: HTMLElement, diff: string): void {
   el.empty();
   const files = parseDiff(diff);
   if (!files.length) {

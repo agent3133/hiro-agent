@@ -20,7 +20,10 @@ export interface VaultPort {
   read(path: string): Promise<string>;
   /** Create or replace a file, creating its folders. */
   write(path: string, text: string): Promise<void>;
-  /** Delete a file for good (sessions, and undoing a create). */
+  /**
+   * Delete a file: in Obsidian the way the user chose (Settings → Files and links → Deleted files) — to the system's
+   * trash, to the vault's `.trash`, or for good (#322); in the Node vault for the tests, for good.
+   */
   remove(path: string): Promise<void>;
   /** Move a file, creating the folders it goes to; in Obsidian, links follow it as the user has them set. */
   move(from: string, to: string): Promise<void>;

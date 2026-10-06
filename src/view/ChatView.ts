@@ -6,7 +6,7 @@
  */
 
 import type { EditorView } from "@codemirror/view";
-import { type Editor, ItemView, MarkdownRenderer, MarkdownView, Menu, Notice, Scope, TFile, WorkspaceLeaf, setIcon } from "obsidian";
+import { type Editor, ItemView, Keymap, MarkdownRenderer, MarkdownView, Menu, Notice, Scope, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 
 import type { AgentSummary, ProfileSummary, ToolCall, TurnChanges }
   from "../api/types";
@@ -18,15 +18,18 @@ import { displayName } from "../mcp/servers";
 import { serverLabel, type LocalServer } from "../settings/connections";
 import { ConfirmModal } from "./ConfirmModal";
 import { AskModal } from "./AskModal";
+import { RewindModal } from "./RewindModal";
 import { UndoModal } from "./UndoModal";
 import { showKeptSelection } from "./keptSelection";
 import type { ContextUsage } from "./contextMeter";
+import { renderContextStatus } from "./contextStatus";
 import { sessionNameFor } from "./sessionName";
 import { ACCEPT, attachmentPrompt, checkAttachment, formatSize } from "./attachments";
 import { coalesce } from "./coalesce";
 import { asStreaming } from "./streamingMarkdown";
 import { RenameModal } from "./RenameModal";
-import { readableName, sessionLabels } from "./sessionLabels";
+import { listedSessions, readableName, sessionLabels } from "./sessionLabels";
+import { pickedTarget } from "./pickedTarget";
 import { callArguments, callLine } from "./toolCallText";
 import { isRemote, withoutRemoteMedia } from "./safeMarkdown";
 
@@ -57,6 +60,10 @@ interface ViewDeps {
   openElsewhere(name: string, view: ChatView, reveal: boolean): boolean;
   /** The conversations changed in *view* — an answer, a new title: the other chat views list them again (#286). */
   sessionsChanged(view: ChatView): void;
+  /** Settles once the agents and connections are first read; a chat restored at startup waits for it. */
+  loaded(): Promise<void>;
+  /** Another chat window, with conversation *name* or a new one (#301). */
+  newWindow(name?: string): Promise<void>;
 }
 
 export interface SetupHost {
@@ -104,6 +111,7 @@ export class ChatView extends ItemView {
   readonly viewId = crypto.randomUUID();
   // How full the window was after this view's last answer, shown again when the view is focused (#153)
   private usage: ContextUsage | null = null;
+  private meter!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, private readonly deps: ViewDeps) {
     super(leaf);
@@ -138,8 +146,24 @@ export class ChatView extends ItemView {
     const bar = root.createDiv({ cls: "obsidian-agent-bar" });
     this.sessionPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-sessions",
                                                   attr: { "aria-label": "Conversation" } });
+    // Ctrl/Cmd held while picking opens the conversation in another window (#301), as a note opens in a new tab.
+    // A native list says nothing of the keys when it changes: they are noted on the click that opens it, and while
+    // it is open
+    let mod = false;
+    const note = (event: MouseEvent | KeyboardEvent): void => { mod = Keymap.isModEvent(event) !== false; };
+    this.sessionPicker.addEventListener("mousedown", note);
+    this.registerDomEvent(window, "keydown", (event) => { if (event.key === "Control" || event.key === "Meta") mod = true; });
+    this.registerDomEvent(window, "keyup", (event) => { if (event.key === "Control" || event.key === "Meta") mod = false; });
     this.sessionPicker.onchange = () => {
-      if (this.sessionPicker.value !== UNKEPT) void this.openSession(this.sessionPicker.value);
+      const picked = this.sessionPicker.value;
+      const target = pickedTarget(picked, this.sessionName, UNKEPT, mod);
+      mod = false;
+      if (target === "window") {
+        this.showInPicker();  // this window keeps its conversation
+        void this.deps.newWindow(picked || undefined);
+      } else if (target === "here") {
+        void this.openSession(picked);
+      }
     };
     this.agentPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-picker", attr: { "aria-label": "Agent" } });
     this.profilePicker = bar.createEl("select", { cls: "dropdown obsidian-agent-profiles",
@@ -173,6 +197,11 @@ export class ChatView extends ItemView {
     this.chips = root.createDiv({ cls: "obsidian-agent-attachments is-hidden" });
     // What a typed message takes along: the note, and its selection (#218)
     this.contextLine = root.createDiv({ cls: "obsidian-agent-context-line is-hidden" });
+    // The context meter in the chat itself, for a chat in a window of its own: that window has no status bar. In the
+    // main window the status bar's meter is the one, and two would be one too many (2026-10-06)
+    this.meter = root.createDiv({ cls: "obsidian-agent-context obsidian-agent-chat-meter is-hidden" });
+    this.placeMeter();
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.placeMeter()));
     const composer = root.createDiv({ cls: "obsidian-agent-composer" });
     this.input = composer.createEl("textarea", {
       cls: "obsidian-agent-input",
@@ -228,6 +257,8 @@ export class ChatView extends ItemView {
       this.keepNoteSelection();
     });
 
+    // Restored with the workspace, a chat can open before the plugin has read the agents and connections
+    await this.deps.loaded();
     await this.refreshAgents();
     this.refreshProfiles();
     await this.refreshSessions();
@@ -235,7 +266,7 @@ export class ChatView extends ItemView {
     const last = this.deps.lastSession();
     if (!this.deps.setup.ready()) this.showSetup();
     else if (last && !this.deps.openElsewhere(last, this, false)) await this.openSession(last);
-    else this.say("system", "Ready.", false);
+    else void this.say("system", "Ready.", false);
   }
 
   override async onClose(): Promise<void> {
@@ -292,7 +323,7 @@ export class ChatView extends ItemView {
     if (this.setupCard && this.deps.setup.ready()) {
       this.setupCard.remove();
       this.setupCard = null;
-      this.say("system", "A connection is set up. Ask away.", false);
+      void this.say("system", "A connection is set up. Ask away.", false);
     }
   }
 
@@ -353,6 +384,9 @@ export class ChatView extends ItemView {
     this.sessionPicker.createEl("option", { text: "New conversation", value: "" });
     // Titles, or names made readable; the option's value stays the name, which identifies the note (#286)
     this.titles = new Map(sessions.filter((s) => s.title).map((s) => [s.name, s.title!]));
+    // The open conversation is listed before its note exists, or a refresh during its first answer blanks the picker
+    sessions = listedSessions(sessions, this.sessionName,
+                              (name) => ({ name, agent: "", model: "", updated: "", exchanges: 0 }));
     const labels = sessionLabels(sessions);
     for (const session of sessions) {
       this.sessionPicker.createEl("option", { text: labels.get(session.name) ?? session.name, value: session.name });
@@ -378,9 +412,12 @@ export class ChatView extends ItemView {
     }
   }
 
-  /** The header's ⋯ menu: rename the conversation, or delete it once it is kept (#286). */
+  /** The header's ⋯ menu: another window, rename the conversation, or delete it once it is kept (#286, #301). */
   private conversationMenu(event: MouseEvent): void {
     const menu = new Menu();
+    menu.addItem((item) => item.setTitle("Open a new chat window").setIcon("plus")
+      .onClick(() => void this.deps.newWindow()));
+    menu.addSeparator();
     menu.addItem((item) => item.setTitle("Rename conversation…").setIcon("pencil")
       .onClick(() => this.renameConversation()));
     menu.addItem((item) => {
@@ -435,7 +472,10 @@ export class ChatView extends ItemView {
     return this.titles.get(name) ?? readableName(name);
   }
 
-  /** Delete the open conversation's note. Asks first: there is no undo, and the journal does not cover it. */
+  /**
+   * Delete the open conversation's note, into the trash Obsidian is set to use (#322). Asks first: undo does not cover
+   * it, as the journal does not record the conversation's own note.
+   */
   private askToDelete(): void {
     const name = this.sessionName;
     if (!name) {
@@ -444,7 +484,8 @@ export class ChatView extends ItemView {
     }
     new AskModal(this.app, {
       title: "Delete this conversation?",
-      body: `"${this.labelOf(name)}" and everything said in it go for good. Notes the agent changed are not touched.`,
+      body: `"${this.labelOf(name)}" and everything said in it go to the trash, as Obsidian is set to keep deleted `
+            + "files (Settings → Files and links). Notes the agent changed are not touched.",
       confirm: "Delete",
     }, (yes) => {
       if (yes) void this.deleteSession(name);
@@ -472,7 +513,7 @@ export class ChatView extends ItemView {
     this.setSession("");
     this.messages.empty();
     this.showContext(null);
-    this.say("system", "New conversation.", false);
+    void this.say("system", "New conversation.", false);
   }
 
   /** Reopen a conversation from its session note. The empty name is the "New conversation" entry. */
@@ -497,18 +538,18 @@ export class ChatView extends ItemView {
       // Without a count: the note records only the last summary's, and an earlier one may be folded into it
       if (answer.summary) await this.addSummaryDivider(0, answer.summary.text);
       for (const message of answer.messages) await this.replay(message.role, message.content, message.calls);
-      this.say("system", this.continueOnRecordedConnection(name, answer), false);
+      void this.say("system", this.continueOnRecordedConnection(name, answer), false);
     } catch (error) {
       // Its note is gone — removed outside the chat (2026-10-05): list what is there now, start a new conversation,
       // and say what happened, rather than sit on a name the list can no longer open
       await this.refreshSessions();
       if (!Array.from(this.sessionPicker.options).some((option) => option.value === name)) {
         await this.newConversation();
-        this.say("system", `"${readableName(name)}" is no longer in the vault: its note in .sessions/ was removed `
+        void this.say("system", `"${readableName(name)}" is no longer in the vault: its note in .sessions/ was removed `
                  + "outside the chat. The list of conversations is up to date again.", false);
         return;
       }
-      this.say("system", `That conversation could not be read: ${messageOf(error)}`, false);
+      void this.say("system", `That conversation could not be read: ${messageOf(error)}`, false);
     }
     this.scrollDown();
   }
@@ -545,6 +586,8 @@ export class ChatView extends ItemView {
       return;
     }
     const turn = this.messages.createDiv({ cls: "obsidian-agent-message mod-agent" });
+    // From an earlier run: what it changed is not in this run's journal, so going back cannot take it back (#303)
+    turn.dataset.replayed = "true";
     if (calls?.length) {
       const tools = turn.createDiv({ cls: "obsidian-agent-tools" });
       for (const call of calls) {
@@ -665,7 +708,8 @@ export class ChatView extends ItemView {
           if (this.turnId) runner.confirm(this.turnId, callId, approved);
         }).open();
       },
-      onContext: (tokens, window, estimated, peak) => this.showContext({ tokens, window, estimated, peak }),
+      onContext: (tokens, window, estimated, peak, answering) =>
+        this.showContext({ tokens, window, estimated, peak, answering }),
       onSetAside: (total) => {
         // Said once per answer, and kept current: the agent no longer sees what it read first
         let note = turn.querySelector<HTMLElement>(".obsidian-agent-set-aside");
@@ -694,9 +738,19 @@ export class ChatView extends ItemView {
     });
   }
 
-  /** The context meter in the status bar: tokens in use of the window, hidden before the first answer (#151). */
+  /** The chat's own meter only where there is no status bar: in a window other than the main one. */
+  private placeMeter(): void {
+    this.meter.toggleClass("is-under-status-bar", this.containerEl.ownerDocument === document);
+  }
+
+  /**
+   * The context meter, in the status bar and in a chat of its own window: tokens in use of the window, hidden
+   * before the first request (#151), and following each request while an answer runs.
+   */
   private showContext(usage: ContextUsage | null): void {
     this.usage = usage;
+    renderContextStatus(this.meter, usage);
+    this.placeMeter();
     // The status bar has one meter: it shows the chat used last, not whichever answered last (#153)
     if (this.deps.current(this)) this.deps.context(usage);
   }
@@ -750,6 +804,8 @@ export class ChatView extends ItemView {
   private addFooter(turn: HTMLElement, body: HTMLElement, usage: Record<string, unknown>,
                     changed: TurnChanges | null = null): void {
     const footer = turn.createDiv({ cls: "obsidian-agent-footer" });
+    // Going back to an earlier message takes this answer's changes back too (#303)
+    if (changed) turn.dataset.turn = changed.turn;
     const seconds = usage.seconds ? `${usage.seconds}s` : "";
     const calls = usage.tool_calls ? `${usage.tool_calls} tool call${usage.tool_calls === 1 ? "" : "s"}` : "";
     footer.createSpan({ text: [seconds, calls].filter(Boolean).join(" · ") });
@@ -772,6 +828,46 @@ export class ChatView extends ItemView {
     const insert = footer.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Insert into note" } });
     setIcon(insert, "file-input");
     insert.onclick = () => this.insertIntoActiveNote(this.streaming?.text ?? body.getText());
+  }
+
+  /**
+   * Go back to before *message* (#303): the answers since then are taken back — what they changed in the vault, newest
+   * first — and the messages from there on removed from the conversation, the message itself put back in the input.
+   * Not past a summary: the exchanges above it are only in the summary now.
+   */
+  private rewindTo(message: HTMLElement, text: string): void {
+    if (this.turnId) {
+      new Notice("Wait until the answer is done, then go back.");
+      return;
+    }
+    const after: HTMLElement[] = [];
+    for (let element: Element | null = message; element; element = element.nextElementSibling) {
+      after.push(element as HTMLElement);
+    }
+    if (after.some((element) => element.hasClass("obsidian-agent-summary-divider"))) {
+      new Notice("The conversation was summarised after this message, so it cannot go back that far: pick a message "
+                 + "below the summary.", 8_000);
+      return;
+    }
+    const exchanges = after.filter((element) => element.hasClass("mod-user")).length;
+    const answers = after.filter((element) => element.hasClass("mod-agent"));
+    const turns = answers.map((element) => element.dataset.turn).filter((turn): turn is string => Boolean(turn)).reverse();
+    const unknown = answers.filter((element) => element.dataset.replayed === "true").length;
+    const agent = this.deps.agent();
+    new RewindModal(this.app, agent, { exchanges, turns, unknown }, async () => {
+      const result = await agent.rewind({ session: this.sessionName || undefined, view: this.viewId }, exchanges, turns);
+      for (const element of after) element.remove();
+      // Nothing said any more: the conversation is named by the next first message, as a new one is
+      if (!this.messages.querySelector(".mod-user")) this.firstPrompt = "";
+      this.input.value = text;
+      this.input.focus();
+      this.showInPicker();
+      if (this.sessionName) {
+        void this.refreshSessions();
+        this.deps.sessionsChanged(this);
+      }
+      return result;
+    }).open();
   }
 
   /** Offered only on turns that wrote something, and only while the journal still holds them. */
@@ -890,6 +986,13 @@ export class ChatView extends ItemView {
 
   private async say(role: "user" | "system", text: string, markdown: boolean): Promise<void> {
     const element = this.messages.createDiv({ cls: `obsidian-agent-message mod-${role}` });
+    if (role === "user") {
+      // A break point (#303): back to before this message, with what the answers since changed taken back
+      const back = element.createEl("button", { cls: "clickable-icon obsidian-agent-rewind",
+                                                attr: { "aria-label": "Go back to before this message" } });
+      setIcon(back, "history");
+      back.onclick = () => this.rewindTo(element, text);
+    }
     if (markdown) await this.renderMarkdown(text, element.createDiv({ cls: "obsidian-agent-body" }));
     else element.createDiv({ cls: "obsidian-agent-body", text });
     this.scrollDown();

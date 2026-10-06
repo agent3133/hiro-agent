@@ -233,11 +233,7 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
       if (!attachment) recordChange({ op: "delete", path: resolved, before: held, after: null });
     };
     const noUndo = attachment ? `.${NOT_UNDONE}` : "";
-    if (args.bool("permanent")) {
-      await app.vault.delete(target, true);
-      record();
-      return `Deleted ${kind} at '${resolved}' permanently${noUndo}`;
-    }
+    // No deleting for good past the user's choice (#322): it goes where Obsidian is set to put deleted files
     // Where "the trash" is, is the user's choice (Settings → Files and links → Deleted files). `vault.getConfig` is
     // not in the published API: read only, and without it the message names no place rather than failing (#173)
     const option = (app.vault as unknown as { getConfig?(key: string): unknown }).getConfig?.("trashOption");

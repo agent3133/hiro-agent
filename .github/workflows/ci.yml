@@ -28,4 +28,6 @@ jobs:
       - name: The bundled packages' notices are up to date
         run: npm run check-notices
       - run: npm run build
+      - name: Obsidian's review rules (ESLint)
+        run: npm run lint
       - run: npm test

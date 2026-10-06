@@ -128,4 +128,12 @@ describe("the meter's words", () => {
     expect(contextTooltip({ tokens: 3800, window: 32800, estimated: true, peak: 24600 }))
       .toContain("took up to 75% (24.6k) with what the agent read");
   });
+
+  it("says, while an answer runs, that it shows the last request with what the agent read (2026-10-06)", () => {
+    const tip = contextTooltip({ tokens: 24600, window: 32800, estimated: false, peak: 24600, answering: true });
+    expect(tip).toBe("While the agent answers: how much of the model's context window its last request took, with "
+      + "the notes and pages it read. When the answer is done, the meter shows what the conversation keeps.");
+    expect(contextTooltip({ tokens: 100, window: 1000, estimated: true, answering: true }))
+      .toContain("it read, estimated from their length.");
+  });
 });

@@ -166,20 +166,33 @@ try {
   const hidden = run<boolean>("return document.visibilityState === 'hidden'");
   if (parts.has("ui") && hidden) console.log("      (Obsidian is minimized: the settings window is not checked)");
   else if (parts.has("ui")) {
-    const tabs = run<{ tabs: string[]; panes: Record<string, string> }>(`
-      app.setting.open(); app.setting.openTabById("agent"); await w(800);
-      const d = activeDocument, out = { tabs: [], panes: {} };
-      const buttons = [...d.querySelectorAll(".obsidian-agent-tab")];
-      out.tabs = buttons.map((b) => b.textContent);
-      for (const b of buttons) { b.click(); await w(600);
-        const pane = [...d.querySelectorAll(".obsidian-agent-pane")].find((el) => el.offsetParent !== null);
-        out.panes[b.textContent] = pane ? [...pane.querySelectorAll(".setting-item-name, h3, h4")].map((el) => el.textContent).join("|") : ""; }
+    // Obsidian 1.13 draws the settings from their definitions (#321): a page each, opened from its entry; and its own
+    // settings search lists a setting from a page's sub-page
+    const pages = run<{ pages: string[]; drawn: Record<string, string>; found: string[] }>(`
+      app.setting.open(); app.setting.openTabById("agent"); await w(1200);
+      const root = app.setting.modalEl, out = { pages: [], drawn: {}, found: [] };
+      const rows = () => [...root.querySelectorAll(".setting-item")].filter((el) => el.offsetParent !== null);
+      const name = (el) => el.querySelector(".setting-item-name")?.textContent ?? "";
+      out.pages = rows().map(name);
+      for (const page of out.pages) {
+        rows().find((el) => name(el) === page)?.click(); await w(1200);
+        out.drawn[page] = rows().map(name).join("|");
+        root.querySelector(".setting-page-back-button")?.click(); await w(600);
+      }
+      const input = [...root.querySelectorAll("input")].find((el) => /search/i.test(el.placeholder || ""));
+      if (input) {
+        input.value = "reasoning effort"; input.dispatchEvent(new Event("input", { bubbles: true })); await w(1200);
+        out.found = [...root.querySelectorAll(".setting-search-result-item")].map((el) => el.textContent);
+        input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
       app.setting.close();
       return out;`);
-    check("the settings show their four tabs in order", tabs.tabs.join() === "Connections,Features,Agents,Advanced",
-          tabs.tabs.join());
-    check("every tab draws something", Object.values(tabs.panes).every((text) => text.length > 0), JSON.stringify(tabs.panes));
-    check("the Agents tab draws the default agent's editor", /Prompt/.test(tabs.panes.Agents ?? ""), tabs.panes.Agents);
+    check("the settings show their four pages in order", pages.pages.join() === "Connections,Features,Agents,Advanced",
+          pages.pages.join());
+    check("every page draws something", Object.values(pages.drawn).every((text) => text.length > 0), JSON.stringify(pages.drawn));
+    check("the Agents page draws the default agent's editor", /Prompt/.test(pages.drawn.Agents ?? ""), pages.drawn.Agents);
+    check("Obsidian's settings search finds a connection's reasoning effort",
+          pages.found.some((text) => text.includes("Reasoning effort")), JSON.stringify(pages.found));
   } else {
     console.log("      (ui not asked for: the settings window is not opened)");
   }
@@ -278,22 +291,45 @@ try {
   // --- One real answer, and taking it back (inprocess/InProcessAgent.ts, core/journal.ts) ---------------------------
   if (parts.has("model")) {
     const note = `${DIR}/Made by the agent.md`;
-    const answer = json<{ ok: boolean; reply: string; changed: string[]; kept: boolean; tool_calls: number }>(cli(
+    const answer = json<{ ok: boolean; reply: string; changed: string[]; turn: string; kept: boolean; tool_calls: number }>(cli(
       "agent:ask", `prompt=Create the note '${note}' with the text: hello from the smoke test. Then reply only: done.`,
       "keep=false", "format=json", "timeout=300"));
     check("agent:ask answers through the local model", answer?.ok === true, JSON.stringify(answer)?.slice(0, 300));
     check("…makes the note, and says it changed it", Boolean(answer?.changed.includes(note)), JSON.stringify(answer?.changed));
     check("…and keep=false saves no conversation", answer?.kept === false);
-    const undo = run<{ files: string[]; diff: string; restored: string[]; exists: boolean }>(`
+    // Taken back from the terminal, as a user would (#302): the diff first, then the undo
+    check("…and names the answer for agent:undo", Boolean(answer?.turn), JSON.stringify(answer?.turn));
+    const listed = cli("agent:undo", "list");
+    check("agent:undo list shows the answer", Boolean(answer?.turn) && listed.includes(answer!.turn), listed.slice(0, 300));
+    const dry = json<{ ok: boolean; files: string[]; diff: string }>(cli("agent:undo", `turn=${answer?.turn ?? ""}`, "dry",
+                                                                        "format=json"));
+    check("agent:undo dry shows its diff, with what the agent wrote", Boolean(dry?.files.includes(note))
+          && Boolean(dry?.diff.includes("+hello")), JSON.stringify(dry).slice(0, 300));
+    const undone = json<{ ok: boolean; restored: string[] }>(cli("agent:undo", `turn=${answer?.turn ?? ""}`, "format=json"));
+    const exists = run<boolean>(`return await app.vault.adapter.exists(${JSON.stringify(note)});`);
+    check("agent:undo takes the note away again", Boolean(undone?.restored.includes(note)) && !exists,
+          JSON.stringify(undone));
+    check("…and a second agent:undo of it says it is undone already",
+          cli("agent:undo", `turn=${answer?.turn ?? ""}`).startsWith("Error: what answer"));
+
+    // Going back to before a message (#303): a kept conversation loses the exchange, the vault what it changed
+    const session = "agent-smoke-rewind";
+    const second = `${DIR}/Made before going back.md`;
+    const kept = json<{ ok: boolean; changed: string[]; kept: boolean }>(cli(
+      "agent:ask", `prompt=Create the note '${second}' with the text: going back. Then reply only: done.`,
+      `session=${session}`, "format=json", "timeout=300"));
+    check("a kept answer for going back makes its note", Boolean(kept?.ok && kept.changed.includes(second)),
+          JSON.stringify(kept)?.slice(0, 300));
+    const back = run<{ restored: string[]; removed: number; exists: boolean; exchanges: unknown }>(`
       const turn = p.inProcess.journal?.last();
-      if (!turn) return { files: [], diff: "", restored: [], exists: true };
-      const diff = await p.inProcess.turnDiff(turn.id);
-      const result = await p.inProcess.undoTurn(turn.id);
-      return { files: diff.files, diff: diff.diff, restored: result.restored,
-               exists: await app.vault.adapter.exists(${JSON.stringify(note)}) };`);
-    check("the answer is in the undo journal, with its diff", undo.files.includes(note) && undo.diff.includes("+hello"),
-          JSON.stringify(undo).slice(0, 300));
-    check("undo takes the note away again", undo.restored.includes(note) && !undo.exists, JSON.stringify(undo.restored));
+      const result = await p.inProcess.rewind({ session: ${JSON.stringify(session)} }, 1, turn ? [turn.id] : []);
+      const text = await app.vault.adapter.read(".sessions/${session}.md");
+      await p.inProcess.deleteSession(${JSON.stringify(session)});
+      return { restored: result.restored, removed: result.removed, exists: await app.vault.adapter.exists(${JSON.stringify(second)}),
+               exchanges: /exchanges: (\\d+)/.exec(text)?.[1] };`);
+    check("going back takes the answer's note away", back.restored.includes(second) && !back.exists, JSON.stringify(back));
+    check("…and removes the exchange from the conversation's note", back.removed === 1 && back.exchanges === "0",
+          JSON.stringify(back));
   } else {
     console.log("      (model not asked for: no answer is run)");
   }

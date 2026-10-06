@@ -501,7 +501,7 @@ export function declaredArgs(tool: Pick<Tool, "parameters">, args: Record<string
 export function confirmArgs(args: Record<string, unknown>): Record<string, unknown> {
   const shown = { ...args };
   for (const key of ["path", "from_path", "to_path"]) {
-    if (typeof shown[key] === "string") shown[key] = noteFile(shown[key] as string);
+    if (typeof shown[key] === "string") shown[key] = noteFile(shown[key]);
   }
   return shown;
 }

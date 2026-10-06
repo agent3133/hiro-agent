@@ -4,7 +4,7 @@
  * `commands/`) and the settings tab (WP8) around it.
  */
 
-import { FileSystemAdapter, Notice, Platform, Plugin, TFile, WorkspaceLeaf, requestUrl } from "obsidian";
+import { FileSystemAdapter, Keymap, Notice, Platform, Plugin, TFile, WorkspaceLeaf, requestUrl } from "obsidian";
 
 import { AgentCommands } from "./commands/AgentCommands";
 import type { NoteContext } from "./commands/context";
@@ -90,7 +90,7 @@ export default class ObsidianAgentPlugin extends Plugin {
     const values = this.store.values();
     const vault = (values.vault ?? {}) as Record<string, unknown>;
     return { defaultAgent: typeof vault.default_agent === "string" ? vault.default_agent : "assistant",
-             profiles: profileSummaries(values).map((p) => p.name) };
+             profiles: profileSummaries(values).map((p) => p.name), configDir: this.app.vault.configDir };
   }, () => this.mcpService.toolInfos(), () => switchedOffTools(this.store.values()), () => this.mcpService.names());
   private readonly pluginBackend = new PluginBackend(this.store, this.catalog, nodePrograms, this.manifest.version,
                                                      this.app.vault.getName());
@@ -229,7 +229,8 @@ export default class ObsidianAgentPlugin extends Plugin {
   override async onload(): Promise<void> {
     await this.loadSettings();
     if (!this.deviceApprovals.initialized()) this.approveWhatIsThere();
-    this.addSettingTab(new AgentSettingTab(this.app, this));
+    this.settingTab = new AgentSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     // Checked first, with Obsidian's own flag: the command line and everything below need the desktop app (#183).
     // A vault without a folder on disk is refused too, as before: the tools and programs read files by path
     if (!Platform.isDesktopApp || !this.vaultPath()) {
@@ -253,6 +254,11 @@ export default class ObsidianAgentPlugin extends Plugin {
         developer: () => this.developer(),
         notice: (text) => new Notice(text, 10_000),
         sessionName: (prompt) => sessionNameFor(prompt),
+      },
+      undo: {
+        turns: () => this.inProcess.turns(),
+        turnDiff: (id) => this.inProcess.turnDiff(id),
+        undoTurn: (id) => this.inProcess.undoTurn(id),
       },
     });
 
@@ -309,8 +315,13 @@ export default class ObsidianAgentPlugin extends Plugin {
       sessionsChanged: (view) => {
         for (const chat of this.chatViews()) if (chat !== view) void chat.followRename();
       },
+      loaded: () => this.loaded,
+      newWindow: (name) => this.newChatWindow(name),
     }));
-    this.addRibbonIcon("bot", "Hiro Agent", () => void this.openChat());
+    // Ctrl/Cmd-click opens another chat window, as it opens a note in a new tab (#301)
+    this.addRibbonIcon("bot", "Hiro Agent", (event) => {
+      void (Keymap.isModEvent(event) ? this.newChatWindow() : this.openChat());
+    });
 
     // Obsidian shows each of these as "Hiro Agent: <name>" — the prefix is this plugin's name in manifest.json
     this.addCommand({
@@ -348,15 +359,18 @@ export default class ObsidianAgentPlugin extends Plugin {
     });
     // The agents are read from the vault once Obsidian has laid it out, not while it waits for this plugin to
     // load (#92); the chat's pickers and the one-command-per-agent list follow when they are there
+    // Only the chats Obsidian has opened: a tab not shown yet holds a placeholder view, and calling into it threw and
+    // ended the refresh before any chat listed its connections (2026-10-06)
     this.app.workspace.onLayoutReady(() => void this.agentsChanged().then(() => {
-      for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) (leaf.view as ChatView).refreshProfiles();
-    }));
+      for (const chat of this.chatViews()) chat.refreshProfiles();
+    }).finally(() => this.markLoaded()));
   }
 
-  override async onunload(): Promise<void> {
+  override onunload(): void {
     // The journal's recorder is module state in obsidianVault: a reloaded plugin starts without one (#177)
     setRecorder(null);
-    await this.mcpManager.closeAll().catch(() => undefined);
+    // Obsidian does not wait for onunload: the MCP servers close in the background
+    void this.mcpManager.closeAll().catch(() => undefined);
   }
 
   /** `obsidian agent:status`: the default agent and connection, the agents, the MCP servers (#71). */
@@ -382,6 +396,15 @@ export default class ObsidianAgentPlugin extends Plugin {
 
   /** The chat used last — focused or sent from — while it is open (#153). */
   private lastChat: ChatView | null = null;
+  /** The settings, described anew after a config write wherever it came from (#321). */
+  private settingTab: AgentSettingTab | null = null;
+  private markLoaded: () => void = () => undefined;
+  /**
+   * Settled once the agents and connections are first read, after Obsidian has laid out the vault (#92). A chat
+   * restored before that waits for it, or it lists no connection and calls its conversation's one "no longer
+   * configured" (2026-10-06).
+   */
+  private readonly loaded = new Promise<void>((resolve) => { this.markLoaded = resolve; });
 
   /** The open chat views, in the workspace's order. */
   private chatViews(): ChatView[] {
@@ -411,13 +434,26 @@ export default class ObsidianAgentPlugin extends Plugin {
     await this.app.workspace.revealLeaf(leaf);
   }
 
-  /** Another chat view, as a new tab in the right sidebar; it starts a conversation of its own (#153). */
-  async newChatWindow(): Promise<void> {
+  /**
+   * Another chat view, as a new tab in the right sidebar (#153), with conversation *name* or a conversation of its
+   * own (#301). A conversation open in another chat is shown there instead, as picking it would.
+   */
+  async newChatWindow(name?: string): Promise<void> {
+    if (name) {
+      const other = this.chatViews().find((chat) => chat.session() === name);
+      if (other) {
+        await this.app.workspace.revealLeaf(other.leaf);
+        return;
+      }
+    }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
     await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
     await this.app.workspace.revealLeaf(leaf);
-    if (leaf.view instanceof ChatView) this.lastChat = leaf.view;
+    if (leaf.view instanceof ChatView) {
+      this.lastChat = leaf.view;
+      if (name) await leaf.view.openSession(name);
+    }
   }
 
   async loadSettings(): Promise<void> {
@@ -453,7 +489,8 @@ export default class ObsidianAgentPlugin extends Plugin {
     await this.pluginBackend.refresh().catch((error) => this.addLog(`Could not refresh the agents and connections: ${messageOf(error)}`));
     // An MCP server that was removed, switched off or changed is closed; the next use starts it as it is now
     await this.mcpService.sync().catch((error) => this.addLog(`Could not update the MCP servers: ${messageOf(error)}`));
-    for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) (leaf.view as ChatView).refreshProfiles();
+    for (const chat of this.chatViews()) chat.refreshProfiles();
+    void this.settingTab?.reload();
   }
 
   /** An agent's system prompt as its next turn would send it, for the Agents tab's "Show as sent" (#67). */
@@ -465,7 +502,7 @@ export default class ObsidianAgentPlugin extends Plugin {
   async agentsChanged(): Promise<void> {
     await this.pluginBackend.refresh().catch((error) => this.addLog(`Could not refresh the agents: ${messageOf(error)}`));
     this.commands?.sync();
-    for (const leaf of this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)) await (leaf.view as ChatView).refreshAgents();
+    for (const chat of this.chatViews()) await chat.refreshAgents();
   }
 
   /** The vault's folder on disk, or null when there is none — a mobile vault, or a future remote one. */
