@@ -9,17 +9,20 @@
 
 import { arrayBufferToBase64, FileSystemAdapter, loadPdfJs, TFile, type App } from "obsidian";
 
-import { DOCUMENT_EXTENSIONS, readDocument } from "../core/documents";
+import { DOCUMENT_EXTENSIONS, importDocument, readDocument, type ImportedDocument } from "../core/documents";
+import { IMAGE_PLACEHOLDER } from "../core/documents/epub";
+import { brokenByWrite } from "../core/frontmatter";
+import { placeImport } from "../core/importText";
 import { canvasToMarkdown } from "../core/documents/canvas";
 import { TEXT_EXTENSIONS, textAttachment } from "../core/documents/textFile";
 import { textOf, type ContentPart } from "../core/llm/openaiChat";
-import { closeNames, sameNameWrittenDifferently } from "../core/attachments";
+import { closeNames, importedImageName, sameNameWrittenDifferently } from "../core/attachments";
 import { pageNumbers } from "../core/pageNumbers";
-import { PathError, safeResolve, within } from "../core/paths";
+import { checkNoteName, noteFile, PathError, safeResolve, within } from "../core/paths";
 import { AUDIO_EXTENSIONS, isAudioFile, recordingAnswer, VIDEO_EXTENSIONS } from "../core/recordings";
 import { defineTool, type Tool } from "../core/tools/tool";
 import { nodeMedia, type AudioSettings } from "./media";
-import { obsidianVault } from "./obsidianVault";
+import { noteWrite, obsidianVault, recordChange } from "./obsidianVault";
 
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp",
@@ -29,6 +32,13 @@ const IMAGE_MIME: Record<string, string> = {
 const PROGRAMS_NOT_APPROVED = "Error: the audio programs set in Settings → Hiro Agent → Features → Audio "
   + "transcription are not approved on this device (they may have come from another device's settings), so "
   + "nothing was run. Tell the user to check them there and approve them.";
+
+/** An open PDF.js document, as far as the readers use it. */
+interface PdfDocument {
+  numPages: number;
+  getPage(number: number): Promise<{ getTextContent(): Promise<{ items: unknown[] }> }>;
+  destroy?(): Promise<void>;
+}
 
 /** 150 dpi balances legibility against the tokens a page costs (Python's _RENDER_DPI). */
 const RENDER_DPI = 150;
@@ -93,6 +103,13 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
     }
   };
 
+  /** The text layer of one page of an open PDF.js *document*. */
+  const pageText = async (document: PdfDocument, number: number): Promise<string> => {
+    const content = await (await document.getPage(number)).getTextContent();
+    const items = content.items as { str?: string; hasEOL?: boolean }[];
+    return items.map((item) => (item.str ?? "") + (item.hasEOL ? "\n" : "")).join("").trim();
+  };
+
   /**
    * A PDF's chosen pages. *asText* true gives the text layer, false page images, and null (not given) the text when
    * the pages hold enough of it, images otherwise (#246): text is far smaller (a 30-page report fits where only 8
@@ -112,9 +129,7 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
         const texts: string[] = [];
         let characters = 0;
         for (const number of chosen) {
-          const content = await (await document.getPage(number)).getTextContent();
-          const items = content.items as { str?: string; hasEOL?: boolean }[];
-          const text = items.map((item) => (item.str ?? "") + (item.hasEOL ? "\n" : "")).join("").trim();
+          const text = await pageText(document, number);
           characters += text.length;
           texts.push(`Page ${number}/${pages}:\n${text || "[no text on this page]"}`);
         }
@@ -200,5 +215,135 @@ export function makeAttachmentTools(app: App, scope: string[] | null, audio: Aud
   const readAttachment = defineTool(
     "read_attachment", async (args) => textOf(await read(args.str("path"), args.str("pages"), asTextOf(args))),
     { content: (args) => read(args.str("path"), args.str("pages"), asTextOf(args)) });
-  return [readAttachment];
+  /** A PDF's text layer, the pages *wanted* picks one after another, for the import. */
+  const pdfText = async (file: TFile, wanted: string): Promise<string> => {
+    const pdfjs = await loadPdfJs();
+    const document = (await pdfjs.getDocument({ data: new Uint8Array(await app.vault.readBinary(file)) }).promise) as PdfDocument;
+    try {
+      const chosen = pageNumbers(wanted, document.numPages);
+      if (typeof chosen === "string") return chosen;
+      const texts: string[] = [];
+      for (const number of chosen) texts.push(await pageText(document, number));
+      return texts.filter(Boolean).join("\n\n");
+    } finally {
+      await document.destroy?.();
+    }
+  };
+
+  /** What *file* holds as Markdown for a note, or the error to return: documents, books, PDFs' text, text files. */
+  const converted = async (file: TFile, shown: string, pages: string): Promise<ImportedDocument | string> => {
+    const extension = file.extension.toLowerCase();
+    if (DOCUMENT_EXTENSIONS.includes(extension)) {
+      return importDocument(extension, new Uint8Array(await app.vault.readBinary(file)), shown, pages);
+    }
+    if (extension === "pdf") {
+      const text = await pdfText(file, pages);
+      if (text.startsWith("Error:")) return text;
+      if (!text.trim()) return `Error: '${shown}' has no text layer (it is probably scanned), so there is no text to import`;
+      return { what: "PDF", text, images: new Map() };
+    }
+    if (TEXT_EXTENSIONS.includes(extension)) {
+      const text = (await app.vault.cachedRead(file)).replace(/^\uFEFF/, "");
+      if (text.includes("\u0000")) return `Error: '${shown}' is not a text file, although its name says so`;
+      return { what: "text file", text, images: new Map() };
+    }
+    if (extension === "md") return `Error: '${file.path}' is a note, not an attachment`;
+    return `Error: '${shown}' has no text to import: import_attachment copies documents (Word, OpenDocument, `
+      + "PowerPoint, Excel), EPUB books, PDFs with a text layer and text files. Images, recordings and videos are "
+      + "read with read_attachment.";
+  };
+
+  /**
+   * A book's *images* saved for the note *note*: in Obsidian's folder for new attachments, or beside the note when that
+   * folder is outside the agent's folders; named after the book, and an image saved before with the same size reused.
+   * The embed of each, by its file in the archive.
+   */
+  const saveImages = async (images: Map<string, Uint8Array>, book: TFile,
+                            note: string): Promise<{ embeds: Map<string, string>; saved: number; reused: number }> => {
+    const embeds = new Map<string, string>();
+    let saved = 0;
+    let reused = 0;
+    const noteFolder = note.includes("/") ? note.slice(0, note.lastIndexOf("/")) : "";
+    for (const [archived, bytes] of images) {
+      const name = importedImageName(book.basename, archived);
+      const offered = await app.fileManager.getAvailablePathForAttachment(name, note);
+      let folder = offered.includes("/") ? offered.slice(0, offered.lastIndexOf("/")) : "";
+      if (!inScope(folder ? `${folder}/${name}` : name)) folder = noteFolder;
+      const at = (file: string): string => (folder ? `${folder}/${file}` : file);
+      let path = at(name);
+      const there = app.vault.getAbstractFileByPath(path);
+      if (there instanceof TFile && there.stat.size === bytes.length) {
+        embeds.set(archived, `![[${path}]]`);
+        reused += 1;
+        continue;
+      }
+      // Another file by that name: the next free one, as Obsidian numbers pasted images
+      const dot = name.lastIndexOf(".");
+      for (let n = 1; app.vault.getAbstractFileByPath(path); n++) path = at(`${name.slice(0, dot)} ${n}${name.slice(dot)}`);
+      if (folder && !app.vault.getAbstractFileByPath(folder)) await app.vault.createFolder(folder);
+      await app.vault.createBinary(path, bytes.slice().buffer);
+      noteWrite();
+      // Undo takes it back while it is as saved: by its size, as an image has no text to compare (#331)
+      recordChange({ op: "create", path, before: null, after: "", binarySize: bytes.length });
+      embeds.set(archived, `![[${path}]]`);
+      saved += 1;
+    }
+    return { embeds, saved, reused };
+  };
+
+  /** The note import_attachment writes, resolved inside the agent's folders, or the error to return. */
+  const targetNote = (raw: string): { path: string; error: string } => {
+    const path = noteFile(raw);
+    const problem = checkNoteName(path);
+    if (problem) return { path, error: `Error: invalid note path '${path}': ${problem}` };
+    try {
+      return { path: safeResolve(path, scope), error: "" };
+    } catch (error) {
+      if (error instanceof PathError) return { path, error: `Error: ${error.message}` };
+      throw error;
+    }
+  };
+
+  const importAttachment = defineTool("import_attachment", async (args) => {
+    const target = targetNote(args.str("note"));
+    if (target.error) return target.error;
+    const { file, error, note: renamed } = find(args.str("path"));
+    if (!file) return error;
+    const pages = args.str("pages").trim();
+    const document = await converted(file, file.path, pages);
+    if (typeof document === "string") return document;
+    if (!document.text.trim()) return `Error: ${pages ? `pages '${pages}' of ` : ""}'${file.path}' hold no text to import`;
+    const current = (await vault.isFile(target.path)) ? await vault.read(target.path) : null;
+    const heading = args.str("heading");
+    // A section of a note that is not there: a name mistyped or made up, not a note to create with a bare heading — the
+    // caller makes it first, from its template (#331, 2026-10-07: an invented chapter title became a stray note)
+    if (current === null && heading.trim()) {
+      return `Error: there is no note '${target.path}' to put the text into its '${heading.trim()}' section. Check the `
+        + "name; create the note first (from its template) and import again — or leave out heading to make a new note "
+        + "holding just the text.";
+    }
+    // Frontmatter the import would break is refused before an image is saved
+    const broken = current === null ? null : brokenByWrite(current, placeImport(current, document.text, heading).content);
+    if (broken) return broken;
+    const images = await saveImages(document.images, file, target.path);
+    const text = document.text.replace(IMAGE_PLACEHOLDER, (_whole, archived: string) => images.embeds.get(archived) ?? "[image]");
+    const placed = placeImport(current, text, heading);
+    await vault.write(target.path, placed.content);
+    const pictures = images.saved || images.reused
+      ? ` ${images.saved + images.reused} image(s) embedded${images.saved ? `, ${images.saved} saved` : ""}`
+        + `${images.reused ? `, ${images.reused} already in the vault` : ""}.` : "";
+    return `${renamed ? `${renamed}\n` : ""}Imported ${text.length} characters of the ${document.what} '${file.path}'`
+      + `${pages ? ` (pages "${pages}")` : ""} into ${placed.where} of '${target.path}'.${pictures} The text is as the `
+      + "file has it; read_note shows it.";
+  }, {
+    // Replacing a section that holds text is overwriting it, asked about like update_note; creating and appending are not
+    // The question names the note that changes; path is the attachment, not a note
+    confirmArgs: async (args) => ({ ...args, note: targetNote(String(args.note ?? "")).path }),
+    destructiveWhen: async (args) => {
+      const target = targetNote(args.str("note"));
+      if (target.error || !(await vault.isFile(target.path))) return false;
+      return placeImport(await vault.read(target.path), "x", args.str("heading")).replaces;
+    },
+  });
+  return [readAttachment, importAttachment];
 }

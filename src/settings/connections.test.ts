@@ -144,6 +144,11 @@ describe("the connection form (#149)", () => {
     const url = "https://api.example.com/v1/models";
     const ok: ProbeAnswer = { status: 200, body: { data: [{ id: "gpt-4o-mini" }] } };
     expect(testVerdict(url, ok, true)).toEqual({ ok: true, text: "Works, and the key was accepted: it serves gpt-4o-mini." });
+    // A provider of many models: the one chosen when it is listed, else how many — never the list's first
+    const many: ProbeAnswer = { status: 200, body: { data: [{ id: "gpt-5.1-chat-latest" }, { id: "gpt-6.1-sol" }] } };
+    expect(testVerdict(url, many, true, "gpt-6.1-sol").text).toBe("Works, and the key was accepted: it offers gpt-6.1-sol.");
+    expect(testVerdict(url, many, true).text).toBe("Works, and the key was accepted: it offers 2 models.");
+    expect(testVerdict(url, many, true, "other").text).not.toContain("gpt-5.1-chat-latest");
     expect(testVerdict(url, { status: 401, body: {} }, true).text).toContain("refused the key (HTTP 401)");
     expect(testVerdict(url, { status: 401, body: {} }, false).text).toContain("wants a key");
     expect(testVerdict(url, { status: 404, body: {} }, false).text).toContain("check the address");

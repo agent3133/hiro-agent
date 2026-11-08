@@ -267,7 +267,7 @@ try {
           const box = v.containerEl.querySelector(".obsidian-agent-keep input");
           if (box.checked) { box.checked = false; box.dispatchEvent(new Event("change")); }
           v.containerEl.querySelector("textarea").value = ${JSON.stringify(`Create the note '${note}' with the text: made in the chat. Then reply only: done.`)};
-          v.containerEl.querySelector("button.mod-cta").click();
+          v.containerEl.querySelector("button.obsidian-agent-send").click();
           let button = null;
           for (let i = 0; i < 240 && !button; i++) { await w(500); button = v.containerEl.querySelector('button[aria-label="Undo what this answer changed"]'); }
           if (!button) return { diff: ["no undo button"], restored: false };

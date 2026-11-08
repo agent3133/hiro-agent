@@ -5,9 +5,7 @@
 /* The bar wraps: a sidebar can be narrow, and the pickers must not push the controls off the edge. */
 .obsidian-agent-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-2);
                       padding: var(--size-4-2) 0; }
-.obsidian-agent-picker { flex: 1; min-width: 6em; }
-.obsidian-agent-sessions { flex: 2; min-width: 8em; }
-.obsidian-agent-profiles { flex: 1; min-width: 6em; }
+.obsidian-agent-sessions { flex: 1; min-width: 8em; }
 /* No named connections in the config means nothing to choose between. */
 .obsidian-agent-profiles.is-hidden { display: none; }
 .obsidian-agent-keep { display: flex; align-items: center; gap: var(--size-2-2); white-space: nowrap;
@@ -62,13 +60,37 @@
 .obsidian-agent-footer { display: flex; align-items: center; gap: var(--size-4-2); margin-top: var(--size-4-2);
   color: var(--text-faint); font-size: var(--font-ui-smaller); }
 .obsidian-agent-error { color: var(--text-error); }
+/* After a failed answer: send the message again, or edit it first */
+.obsidian-agent-retry { display: flex; gap: var(--size-4-2); margin-top: var(--size-4-2); }
 .obsidian-agent-note { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 
-.obsidian-agent-composer { display: flex; gap: var(--size-4-2); align-items: flex-end; }
-/* The "+" for files sits right above Send (#190) */
-.obsidian-agent-actions { display: flex; flex-direction: column; align-items: center; gap: var(--size-4-1); }
-.obsidian-agent-add { align-self: center; }
-.obsidian-agent-input { flex: 1; resize: vertical; font-family: inherit; }
+/* The input as one box, as in an editor's chat: the files added, the text, then "+", the agent, the connection and
+   Send in a row inside it. The box's top edge is pulled up or down to resize it. */
+.obsidian-agent-composer { position: relative; display: flex; flex-direction: column;
+  border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
+  background: var(--background-primary); }
+.obsidian-agent-composer:focus-within { border-color: var(--interactive-accent); }
+.obsidian-agent-resize { position: absolute; top: -5px; left: 0; right: 0; height: 10px; cursor: ns-resize;
+  touch-action: none; z-index: 1; }
+.obsidian-agent-resize::before { content: ""; position: absolute; top: 3px; left: 50%; width: 32px; height: 3px;
+  transform: translateX(-50%); border-radius: 2px; background: var(--background-modifier-border-hover); opacity: 0;
+  transition: opacity 0.15s; }
+.obsidian-agent-composer:hover .obsidian-agent-resize::before,
+.obsidian-agent-resize:active::before { opacity: 1; }
+.obsidian-agent-composer .obsidian-agent-attachments { padding: var(--size-4-2) var(--size-4-2) 0; }
+.obsidian-agent-input, .obsidian-agent-input:hover, .obsidian-agent-input:focus, .obsidian-agent-input:focus-visible {
+  resize: none; border: none; box-shadow: none; background: transparent; }
+.obsidian-agent-input { width: 100%; min-height: 3em; padding: var(--size-4-2); font-family: inherit; }
+.obsidian-agent-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--size-4-1);
+  padding: var(--size-4-1) var(--size-4-2) var(--size-4-2); }
+/* The pickers as quiet buttons: their names, no frame, as long as the row has room */
+.obsidian-agent-toolbar select.dropdown { flex: 0 1 auto; min-width: 0; max-width: 14em; height: auto;
+  padding: var(--size-2-1) var(--size-4-5) var(--size-2-1) var(--size-4-1); border: none; box-shadow: none;
+  background-color: transparent; color: var(--text-muted); font-size: var(--font-ui-smaller);
+  text-overflow: ellipsis; }
+.obsidian-agent-toolbar select.dropdown:hover { background-color: var(--background-modifier-hover); color: var(--text-normal); }
+.obsidian-agent-send { margin-left: auto; width: 28px; height: 28px; padding: 0; border-radius: 50%; }
+.obsidian-agent-send svg { width: 16px; height: 16px; }
 
 .obsidian-agent-confirm-summary { font-weight: var(--font-semibold); }
 .obsidian-agent-confirm-detail { white-space: pre-wrap; max-height: 14em; overflow-y: auto;

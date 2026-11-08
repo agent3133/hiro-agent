@@ -14,6 +14,11 @@ restore a deleted one from the trash. What the agent deletes goes where Obsidian
 (Settings → Files and links → Deleted files): the system trash, the vault's `.trash` folder, or gone for good. Text in the chat can be selected and copied with Ctrl+C, or with **Copy** in
 the right-click menu; the copy button under an answer copies all of it.
 
+The header holds the conversation: its picker, *Keep* and the **⋯** menu. Everything about the next message is
+in the input box below — **+** for files, the agent and the connection pickers, and the send arrow, which turns
+into a stop button while an answer runs. Pull the box's top edge up or down to make it taller or shorter; a
+double-click on the edge goes back to the default height, and the height you chose is kept on this device.
+
 Another chat beside the first, with a conversation of its own, opens from the chat's **⋯** menu (*Open a new chat
 window*), with Ctrl-click (Cmd-click on a Mac) on the ribbon icon, or with **Hiro Agent: New chat window**. Holding
 Ctrl/Cmd while picking a conversation in the header opens it in another chat and leaves this one as it is. The commands
@@ -23,17 +28,23 @@ answering waits for it.
 
 To give the agent something that is not in the vault yet — a photo, a scanned PDF, a voice memo, a short video, a
 Word, Excel or PowerPoint file —
-drop the files onto the chat, or press **+** above *Send*. They show above the input until you send, and you can
+drop the files onto the chat, or press **+** in the input box. They show at the top of the box until you send, and you can
 take one out again with its ✕. Sending saves them in the vault, where Obsidian puts new attachments (Settings →
 Files and links → Default location for new attachments), and the message embeds them, so a kept conversation's
 note shows them too. The agent reads them with `read_attachment`: images as images, PDFs as their text (page by page as images when they are scans), recordings
 and videos transcribed on your computer, Word documents as text with their headings, lists and tables, Excel
 sheets as tables, PowerPoint slides with their notes, the same from LibreOffice's `.odt`, `.ods` and `.odp`, EPUB
-books chapter by chapter (first the list of chapters), canvases as their cards, groups and arrows, and text
+books chapter by chapter (first the list of chapters, from the book's table of contents; a long chapter in parts),
+with bold and italic kept, canvases as their cards, groups and arrows, and text
 files (`.csv`, `.json`, `.txt`, …) as they are.
 Files already in the vault are found with `list_attachments`, which lists everything that is not a note with its
 type and size, by folder or by name ("the invoice in my Inbox"). `list_notes` says how many attachments a folder
 has, and `find_notes` names the attachments that match when no note does.
+To put a file's text into a note — "copy chapter 3 of the book into the Content section of my chapter note" — the
+agent uses `import_attachment`, which writes the text exactly as the file has it instead of having the model retype
+it: the chapters, pages, sheets or slides you name, into one section of the note or at its end. It asks first when
+that section already holds text, and a book's images go to your folder for new attachments (Settings → Files and
+links). Undo takes the note and the images back.
 The old `.doc`, `.xls` and `.ppt` formats can't be read: save them as `.docx`, `.xlsx` or `.pptx`. Images may be up
 to 20 MB, PDFs and documents 50 MB, recordings and videos 100 MB.
 
@@ -56,7 +67,7 @@ named and left alone, and an answer from before Obsidian started the plugin cann
 past a summary of the conversation: those exchanges are only in the summary now.
 
 Conversations are kept. The first turn names one after what you asked (`2026-09-23 1432 move-ideas-to-archive`)
-and the plugin writes it to `<vault>/.sessions/`; the picker beside the agent picker reopens any of them, and
+and the plugin writes it to `<vault>/.sessions/`; the picker in the header reopens any of them, and
 the view comes back to whichever you had open. The picker shows each conversation's title — what you called it — or
 else the start of its first message. The **⋯** button beside it renames the open conversation or deletes it, and
 *Hiro Agent: Rename conversation* renames it from the command palette. The title is kept as you type it, in the
@@ -66,10 +77,10 @@ content of notes the agent read, and it syncs wherever your vault syncs. Credent
 — `sk-…`, `ghp_…`, `AKIA…`, a private key block, an `api_key: …` line — are replaced by a marker before the note
 is written, but that is a net and not a guarantee: anything without a recognisable shape goes through.
 
-Beside the agent picker is the **connection** — the `llm_profiles` entry this turn runs against. Leave it on
-*Agent's choice* and the agent's own `llm_profile` decides, falling back to `default_llm_profile`; pick one and
-it overrides both, for this and every later turn until you change it. It is hidden when the config names no
-profiles. Hovering an agent shows the model it asks for.
+Beside the agent picker, in the input box, is the **connection** — the model connection the next messages run against. Leave it on
+*Agent's choice* and the connection set for the agent decides, falling back to the default connection; pick one and
+it overrides both, for this and every later message until you change it. It is hidden when no connection is
+set up. Hovering an agent shows the model it asks for.
 
 Which endpoint a note is sent to is your decision and never the model's, so an agent cannot override the
 choice — and a profile name the config does not have is an error rather than a quiet fall back to another one.
@@ -126,8 +137,10 @@ follows each request to the model, with the notes and pages the agent read; thos
 the bar drops back when it is done, and the tooltip says how far the answer went with them. The window is the one the server says it has, or the connection's *context window* setting
 for a cloud API.
 
-The agent answers through whatever endpoint the default connection (Settings → Connections) points at, so start
+The agent answers through whatever endpoint the default connection (*Settings → Hiro Agent → Connections*) points at, so start
 your `llama-server` first — without one an answer ends with a message saying the server does not answer.
+Your message is not lost: under the error, **Try again** sends it once more when the server is up, and
+**Edit** puts it back into the input to change it first.
 
 ## Commands
 
@@ -168,7 +181,7 @@ obsidian agent:undo turn=3f9a0c1d2e4b     # take it back; without turn=, the new
 
 `agent:ask` runs one turn and prints the reply when it ends — nothing shows meanwhile. Each call is a new
 conversation, saved in `.sessions/` like a chat one (the chat's picker opens it); `session=<name>` continues one.
-`connection=` wins over the agent's own, as the chat header's picker does. `selection=<text>` sends text as if it were
+`connection=` wins over the agent's own, as the chat's connection picker does. `selection=<text>` sends text as if it were
 selected in that note, as the chat does.
 
 - **Ctrl+C does not stop the turn**: it ends the terminal, and the turn runs on inside Obsidian — a notice there

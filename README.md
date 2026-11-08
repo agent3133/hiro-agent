@@ -98,7 +98,8 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
   button for anything an answer changed, which shows the diff first.
 - **Attachments** — images, PDFs (as text, or page by page when scanned), Word, Excel, PowerPoint and OpenDocument
   files, EPUB books, canvases and text files as text, voice recordings and videos, transcribed on your computer with
-  whisper.cpp and ffmpeg. The agent lists, moves and deletes the files in your vault that are not notes. Drop files
+  whisper.cpp and ffmpeg. It copies a file's text into a note exactly — a book chapter by chapter, with its images —
+  rather than retyping it. The agent lists, moves and deletes the files in your vault that are not notes. Drop files
   onto the chat, or press **+**, to give the agent something that is not in the vault yet.
 - **Bases** — the agent runs a Base and reads its rows as Obsidian computes them: a `.base` file, a Base embedded in
   a note, or one it writes for the question. Needs the Bases core plugin.

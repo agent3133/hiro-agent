@@ -22,6 +22,11 @@ export interface Change {
   after: string | null;
   /** move only: where it went */
   movedTo?: string;
+  /**
+   * A binary file the agent created (an image import_attachment saved, #331): its size in bytes. Its text is no use
+   * to compare, so undo removes it while it still has this size; `after` holds a line for the diff.
+   */
+  binarySize?: number;
 }
 
 export interface Turn {
@@ -98,6 +103,7 @@ export class Journal {
   diff(turn: Turn): string {
     const sections = turn.changes.map((change) => {
       if (change.op === "move") return `--- ${change.path}\n+++ ${change.movedTo}\n(moved)\n`;
+      if (change.binarySize !== undefined) return `--- /dev/null\n+++ b/${change.path}\n(a file of ${change.binarySize} bytes)\n`;
       const from = change.op === "create" ? "/dev/null" : `a/${change.path}`;
       const to = change.op === "delete" ? "/dev/null" : `b/${change.path}`;
       const body = unifiedDiff(linesKeepEnds(change.before ?? ""), linesKeepEnds(change.after ?? ""), from, to);
@@ -121,8 +127,10 @@ export class Journal {
     try {
       for (const change of [...turn.changes].reverse()) {
         const target = change.movedTo ?? change.path;
-        const current = (await vault.isFile(target)) ? await vault.read(target) : null;
-        if (current !== change.after) {
+        const unchanged = change.binarySize !== undefined
+          ? (await vault.isFile(target)) && (await vault.size?.(target)) === change.binarySize
+          : ((await vault.isFile(target)) ? await vault.read(target) : null) === change.after;
+        if (!unchanged) {
           result.refused.push({ path: target, reason: "changed after the agent wrote it" });
           continue;
         }

@@ -34,6 +34,10 @@ import { callArguments, callLine } from "./toolCallText";
 import { isRemote, withoutRemoteMedia } from "./safeMarkdown";
 
 export const CHAT_VIEW_TYPE = "obsidian-agent-chat";
+/** The input's height the user pulled it to, on this device (Obsidian's local storage, per vault). */
+const INPUT_HEIGHT_KEY = "hiro-agent-input-height";
+/** The agents are read again on the way into a chat at most this often: reading them is a few small files. */
+const AGENTS_REREAD_MS = 5_000;
 
 interface ViewDeps {
   /** The agent, inside the plugin: turns, conversations, the turns it can take back (#85, #88). */
@@ -54,6 +58,11 @@ interface ViewDeps {
   context(usage: ContextUsage | null): void;
   /** This view was focused or sent something: commands and the context meter follow it (#153). */
   used(view: ChatView): void;
+  /**
+   * Read the vault's agents again, for every chat's picker and the commands: an agent file added or changed outside
+   * the settings — by hand, by sync, on another device — is in a dot folder Obsidian sends no events for.
+   */
+  rereadAgents(): Promise<void>;
   /** Whether this is the chat used last, whose context the status bar shows. */
   current(view: ChatView): boolean;
   /** Whether conversation *name* is open in another chat view; *reveal* switches to that view (#153). */
@@ -89,6 +98,8 @@ export class ChatView extends ItemView {
   private pending: File[] = [];
   private chips!: HTMLElement;
   private agentPicker!: HTMLSelectElement;
+  /** When this chat last had the agents read again; 0 before it was first used. */
+  private agentsRead = 0;
   private profilePicker!: HTMLSelectElement;
   private sessionPicker!: HTMLSelectElement;
   private menuButton!: HTMLButtonElement;
@@ -165,11 +176,6 @@ export class ChatView extends ItemView {
         void this.openSession(picked);
       }
     };
-    this.agentPicker = bar.createEl("select", { cls: "dropdown obsidian-agent-picker", attr: { "aria-label": "Agent" } });
-    this.profilePicker = bar.createEl("select", { cls: "dropdown obsidian-agent-profiles",
-                                                  attr: { "aria-label": "Connection" } });
-    this.profilePicker.onchange = () => this.deps.rememberProfile(this.profilePicker.value);
-
     const keep = bar.createEl("label", { cls: "obsidian-agent-keep" });
     this.keepBox = keep.createEl("input", { type: "checkbox" });
     this.keepBox.checked = this.deps.keepByDefault();
@@ -193,8 +199,6 @@ export class ChatView extends ItemView {
       })).showAtMouseEvent(event);
     });
 
-    // Files added to the next message: by "+", or dropped anywhere on the chat (#190)
-    this.chips = root.createDiv({ cls: "obsidian-agent-attachments is-hidden" });
     // What a typed message takes along: the note, and its selection (#218)
     this.contextLine = root.createDiv({ cls: "obsidian-agent-context-line is-hidden" });
     // The context meter in the chat itself, for a chat in a window of its own: that window has no status bar. In the
@@ -202,23 +206,35 @@ export class ChatView extends ItemView {
     this.meter = root.createDiv({ cls: "obsidian-agent-context obsidian-agent-chat-meter is-hidden" });
     this.placeMeter();
     this.registerEvent(this.app.workspace.on("layout-change", () => this.placeMeter()));
+    // One box, as in an editor's chat: the files added, the text, and a row with "+", the agent, the connection and
+    // Send — the header keeps only the conversation's own controls. Its top edge is pulled up or down to resize it
     const composer = root.createDiv({ cls: "obsidian-agent-composer" });
+    const handle = composer.createDiv({ cls: "obsidian-agent-resize",
+                                        attr: { "aria-label": "Drag to resize, double-click for the default size" } });
+    // Files added to the next message: by "+", or dropped anywhere on the chat (#190)
+    this.chips = composer.createDiv({ cls: "obsidian-agent-attachments is-hidden" });
     this.input = composer.createEl("textarea", {
       cls: "obsidian-agent-input",
       attr: { rows: "3", placeholder: "Ask the agent — Enter to send, Shift+Enter for a new line" },
     });
-    const actions = composer.createDiv({ cls: "obsidian-agent-actions" });
-    const add = actions.createEl("button", { cls: "clickable-icon obsidian-agent-add",
+    this.resizable(handle, root);
+    const toolbar = composer.createDiv({ cls: "obsidian-agent-toolbar" });
+    const add = toolbar.createEl("button", { cls: "clickable-icon obsidian-agent-add",
                                              attr: { "aria-label": "Add images, PDFs, recordings or videos" } });
     setIcon(add, "plus");
-    const picker = actions.createEl("input", { type: "file", attr: { multiple: "", accept: ACCEPT } });
+    const picker = toolbar.createEl("input", { type: "file", attr: { multiple: "", accept: ACCEPT } });
     picker.hide();
     add.onclick = () => picker.click();
     picker.onchange = () => {
       this.addFiles(Array.from(picker.files ?? []));
       picker.value = "";
     };
-    this.sendButton = actions.createEl("button", { text: "Send", cls: "mod-cta" });
+    this.agentPicker = toolbar.createEl("select", { cls: "dropdown obsidian-agent-picker", attr: { "aria-label": "Agent" } });
+    this.profilePicker = toolbar.createEl("select", { cls: "dropdown obsidian-agent-profiles",
+                                                      attr: { "aria-label": "Connection" } });
+    this.profilePicker.onchange = () => this.deps.rememberProfile(this.profilePicker.value);
+    this.sendButton = toolbar.createEl("button", { cls: "mod-cta obsidian-agent-send" });
+    this.setRunning(false);
     const carriesFiles = (event: DragEvent): boolean => Array.from(event.dataTransfer?.types ?? []).includes("Files");
     this.registerDomEvent(root, "dragover", (event) => {
       if (!carriesFiles(event)) return;
@@ -255,6 +271,12 @@ export class ChatView extends ItemView {
     this.registerDomEvent(this.containerEl, "focusin", () => {
       this.deps.used(this);
       this.keepNoteSelection();
+      // The agents read again on the way into the chat, at most every few seconds: an agent added outside the
+      // settings shows up by the time the picker is opened
+      if (Date.now() - this.agentsRead > AGENTS_REREAD_MS) {
+        this.agentsRead = Date.now();
+        void this.deps.rereadAgents();
+      }
     });
 
     // Restored with the workspace, a chat can open before the plugin has read the agents and connections
@@ -292,6 +314,8 @@ export class ChatView extends ItemView {
 
   /** Fill the agent picker, so it lists what this vault actually has. */
   async refreshAgents(): Promise<void> {
+    // The agent chosen stays chosen while it still exists: a list read again must not switch the chat's agent
+    const chosen = this.agentPicker.value;
     this.agentPicker.empty();
     const agents: AgentSummary[] = this.catalog()?.agents ?? [];
     for (const agent of agents.length ? agents : [{ name: this.deps.defaultAgent() }]) {
@@ -299,6 +323,7 @@ export class ChatView extends ItemView {
       // Which model an agent talks to is the question this picker could not answer before.
       option.title = [agent.description, agent.model ? `model: ${agent.model}` : ""].filter(Boolean).join(" · ");
     }
+    if (chosen && Array.from(this.agentPicker.options).some((option) => option.value === chosen)) this.agentPicker.value = chosen;
   }
 
   /**
@@ -665,7 +690,12 @@ export class ChatView extends ItemView {
     const isNewSession = this.keepBox.checked && !this.sessionName;
     if (isNewSession) this.setSession(sessionNameFor(typed || this.firstFileName(saved)));
     else this.showInPicker();
-    await this.say("user", prompt, true);
+    await this.ask(prompt, request ? request.context : this.activeNoteContext());
+  }
+
+  /** Show *prompt* as the user's message and run the agent's answer to it; also what *Try again* sends. */
+  private async ask(prompt: string, context: NoteContext | undefined): Promise<void> {
+    const message = await this.say("user", prompt, true);
 
     const turn = this.messages.createDiv({ cls: "obsidian-agent-message mod-agent" });
     const thinking = turn.createEl("details", { cls: "obsidian-agent-thinking" });
@@ -689,7 +719,7 @@ export class ChatView extends ItemView {
     this.turnId = runner.send(prompt, { agent: this.agentPicker.value, session: this.sessionName || undefined,
                                         view: this.viewId,
                                         profile: this.profilePicker.value || undefined,
-                                        context: request ? request.context : this.activeNoteContext() }, {
+                                        context }, {
       onToken: (text) => {
         if (!this.streaming) return;
         this.streaming.text += text;
@@ -731,11 +761,46 @@ export class ChatView extends ItemView {
           this.deps.sessionsChanged(this);
         }
       },
-      onError: (message) => {
-        turn.createDiv({ cls: "obsidian-agent-error", text: message });
+      onError: (error) => {
+        turn.createDiv({ cls: "obsidian-agent-error", text: error });
+        this.offerRetry(turn, message, prompt, context);
         this.finishTurn();
       },
     });
+  }
+
+  /**
+   * After a failed answer — the server down, the connection wrong — the message is not lost: *Try again* sends it
+   * once more, *Edit* puts it back into the input. The agent never saw it, so either way the failed exchange leaves
+   * the chat.
+   */
+  private offerRetry(turn: HTMLElement, message: HTMLElement, prompt: string, context: NoteContext | undefined): void {
+    const buttons = turn.createDiv({ cls: "obsidian-agent-retry" });
+    const again = buttons.createEl("button", { text: "Try again", cls: "mod-cta" });
+    const edit = buttons.createEl("button", { text: "Edit" });
+    const drop = (): boolean => {
+      if (this.turnId) {
+        new Notice("The agent is still answering. Stop it or wait, then try again.");
+        return false;
+      }
+      message.remove();
+      turn.remove();
+      return true;
+    };
+    again.onclick = () => {
+      if (!this.deps.setup.ready()) {
+        this.showSetup();
+        return;
+      }
+      if (drop()) void this.ask(prompt, context);
+    };
+    edit.onclick = () => {
+      if (!drop()) return;
+      // What was typed meanwhile stays, after the message
+      const typed = this.input.value.trim();
+      this.input.value = typed ? `${prompt}\n\n${typed}` : prompt;
+      this.input.focus();
+    };
   }
 
   /** The chat's own meter only where there is no status bar: in a window other than the main one. */
@@ -979,12 +1044,57 @@ export class ChatView extends ItemView {
   }
 
   private setRunning(running: boolean): void {
-    this.sendButton.setText(running ? "Stop" : "Send");
+    setIcon(this.sendButton, running ? "square" : "arrow-up");
+    this.sendButton.setAttr("aria-label", running ? "Stop (Escape)" : "Send (Enter)");
     this.sendButton.toggleClass("mod-warning", running);
     this.sendButton.onclick = running ? () => this.cancel() : () => void this.submit();
   }
 
-  private async say(role: "user" | "system", text: string, markdown: boolean): Promise<void> {
+  /**
+   * The input's height follows *handle*, its box's top edge, pulled up or down: at least two lines, at most most of
+   * the chat. Kept on this device for every chat; a double-click goes back to the default.
+   */
+  private resizable(handle: HTMLElement, root: HTMLElement): void {
+    const apply = (height: number | null): void => {
+      if (height === null) this.input.style.removeProperty("height");
+      else this.input.style.height = `${Math.round(height)}px`;
+    };
+    const saved = Number(this.app.loadLocalStorage(INPUT_HEIGHT_KEY));
+    if (saved > 0) apply(saved);
+    handle.addEventListener("pointerdown", (start) => {
+      start.preventDefault();
+      // Captured, so the drag goes on outside the thin edge; a pointer that cannot be captured still drags over it
+      try {
+        handle.setPointerCapture(start.pointerId);
+      } catch {
+        // no active pointer by that id
+      }
+      const from = this.input.getBoundingClientRect().height;
+      const style = getComputedStyle(this.input);
+      // Two lines of text, and the padding around them
+      const smallest = (parseFloat(style.lineHeight) || 20) * 2 + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      const move = (event: PointerEvent): void => {
+        // Up makes it taller: the box grows into the conversation above it
+        const wanted = from + (start.clientY - event.clientY);
+        apply(Math.min(Math.max(wanted, smallest), root.getBoundingClientRect().height * 0.7));
+      };
+      const stop = (): void => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", stop);
+        handle.removeEventListener("pointercancel", stop);
+        this.app.saveLocalStorage(INPUT_HEIGHT_KEY, String(Math.round(this.input.getBoundingClientRect().height)));
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", stop);
+      handle.addEventListener("pointercancel", stop);
+    });
+    handle.addEventListener("dblclick", () => {
+      apply(null);
+      this.app.saveLocalStorage(INPUT_HEIGHT_KEY, null);
+    });
+  }
+
+  private async say(role: "user" | "system", text: string, markdown: boolean): Promise<HTMLElement> {
     const element = this.messages.createDiv({ cls: `obsidian-agent-message mod-${role}` });
     if (role === "user") {
       // A break point (#303): back to before this message, with what the answers since changed taken back
@@ -996,6 +1106,7 @@ export class ChatView extends ItemView {
     if (markdown) await this.renderMarkdown(text, element.createDiv({ cls: "obsidian-agent-body" }));
     else element.createDiv({ cls: "obsidian-agent-body", text });
     this.scrollDown();
+    return element;
   }
 
   /** Render *text* off the page and put it in *target* in one step, so an answer never flashes empty (#172). */

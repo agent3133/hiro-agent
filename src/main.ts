@@ -305,6 +305,7 @@ export default class ObsidianAgentPlugin extends Plugin {
         this.lastChat = view;
         renderContextStatus(this.contextStatus(), view.contextUsage());
       },
+      rereadAgents: () => this.agentsChanged(),
       current: (view) => this.lastChat === view || !this.lastChat,
       openElsewhere: (name, view, reveal) => {
         const other = this.chatViews().find((chat) => chat !== view && chat.session() === name);
@@ -483,7 +484,7 @@ export default class ObsidianAgentPlugin extends Plugin {
     setting?.openTabById(this.manifest.id);
   }
 
-  /** After a config write: the connections may have changed, and the chat header's picker should list them. */
+  /** After a config write: the connections may have changed, and the chat's connection picker should list them. */
   async configChanged(): Promise<void> {
     // A failure leaves the pickers as they were; the log says why (#174)
     await this.pluginBackend.refresh().catch((error) => this.addLog(`Could not refresh the agents and connections: ${messageOf(error)}`));

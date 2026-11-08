@@ -16,17 +16,18 @@ export const SCHEMA = schemaJson as unknown as JsonSchema;
 
 type Values = Record<string, unknown>;
 
-/** *base* with *changes* applied, recursing into sections; null removes a key — `merge` (config/writer.py). */
+/**
+ * *base* with *changes* applied, recursing into sections; null removes a key — `merge` (config/writer.py). A section
+ * that is new is merged into nothing, so a null in it means "not set" there too and is left out, as in a JSON merge
+ * patch: a new connection's empty fields (`provider: null`) were stored as null and failed the schema (2026-10-08).
+ */
 export function merge(base: Values, changes: Values): Values {
   const merged: Values = { ...base };
+  const isSection = (value: unknown): value is Values => Boolean(value) && typeof value === "object" && !Array.isArray(value);
   for (const [key, value] of Object.entries(changes)) {
     if (value === null || value === undefined) delete merged[key];
-    else if (value && typeof value === "object" && !Array.isArray(value)
-             && merged[key] && typeof merged[key] === "object" && !Array.isArray(merged[key])) {
-      merged[key] = merge(merged[key] as Values, value as Values);
-    } else {
-      merged[key] = value;
-    }
+    else if (isSection(value)) merged[key] = merge(isSection(merged[key]) ? merged[key] : {}, value);
+    else merged[key] = value;
   }
   return merged;
 }

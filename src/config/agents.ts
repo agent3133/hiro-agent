@@ -33,7 +33,8 @@ const NEW_AGENT_PROMPT = "You are a helpful assistant for the Obsidian vault at 
 const TOOL_GROUPS: [string, string[]][] = [
   ["Read notes", ["read_note", "read_notes", "list_notes", "find_notes", "search_vault", "list_tags", "note_outline",
                   "get_backlinks", "get_outlinks", "get_metadata", "find_broken_links", "list_attachments", "read_attachment"]],
-  ["Write notes", ["create_note", "edit_note", "append_to_note", "update_note", "update_metadata", "create_from_template"]],
+  ["Write notes", ["create_note", "edit_note", "append_to_note", "update_note", "update_metadata", "create_from_template",
+                   "import_attachment"]],
   ["Delete and move", ["delete_note", "move_note"]],
   ["Tasks", ["list_tasks", "list_tasknotes", "create_tasknote", "complete_tasknote"]],
   ["Obsidian", ["daily_note", "list_templates", "open_in_obsidian", "query_base"]],

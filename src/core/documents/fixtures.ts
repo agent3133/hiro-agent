@@ -10,8 +10,8 @@ const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main
 const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PKG = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
 
-function zip(files: Record<string, string>): Uint8Array {
-  return zipSync(Object.fromEntries(Object.entries(files).map(([name, text]) => [name, strToU8(text)])));
+function zip(files: Record<string, string | Uint8Array>): Uint8Array {
+  return zipSync(Object.fromEntries(Object.entries(files).map(([name, data]) => [name, typeof data === "string" ? strToU8(data) : data])));
 }
 
 /** A run of text. */
@@ -159,6 +159,51 @@ export function odp(slides: { title?: string; bullets?: string[]; notes?: string
     + (slide.bullets ? frame("outline", `<text:list>${slide.bullets.map((b) => `<text:list-item><text:p>${b}</text:p></text:list-item>`).join("")}</text:list>`) : "")
     + (slide.notes ? `<presentation:notes>${frame("notes", `<text:p>${slide.notes}</text:p>`)}</presentation:notes>` : "")
     + "</draw:page>").join("")}</office:presentation>`);
+}
+
+/** An entry of a fixture book's table of contents: its title, the link (`text/a.xhtml#id`), and entries below it. */
+export interface TocEntry {
+  title: string;
+  href: string;
+  children?: TocEntry[];
+}
+
+/**
+ * An EPUB with a table of contents (#330): *files* (name below OEBPS/text → XHTML body contents) in spine order,
+ * the contents as an EPUB 3 navigation document (`toc: "nav"`) or an EPUB 2 NCX (`toc: "ncx"`), its links relative
+ * to OEBPS/ like the files' names (`text/a.xhtml#id`). Bodies go in as written, so `<pre/>` stays self-closed.
+ */
+export function epubWithToc(book: { title: string; author?: string; files: Record<string, string>; toc: "nav" | "ncx";
+                                    entries: TocEntry[]; images?: Record<string, Uint8Array> }): Uint8Array {
+  const names = Object.keys(book.files);
+  const navList = (entries: TocEntry[]): string => `<ol>${entries.map((entry) =>
+    `<li><a href="${entry.href}">${entry.title}</a>${entry.children?.length ? navList(entry.children) : ""}</li>`).join("")}</ol>`;
+  const navPoints = (entries: TocEntry[]): string => entries.map((entry) =>
+    `<navPoint><navLabel><text>${entry.title}</text></navLabel><content src="${entry.href}"/>`
+    + `${navPoints(entry.children ?? [])}</navPoint>`).join("");
+  const files: Record<string, string | Uint8Array> = {
+    "mimetype": "application/epub+zip",
+    "META-INF/container.xml": '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+      + '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+    "OEBPS/content.opf": '<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+      + `<metadata><dc:title>${book.title}</dc:title>${book.author ? `<dc:creator>${book.author}</dc:creator>` : ""}</metadata><manifest>`
+      + names.map((name, i) => `<item id="f${i + 1}" href="text/${name}" media-type="application/xhtml+xml"/>`).join("")
+      + (book.toc === "nav" ? '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                            : '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>')
+      + `</manifest><spine${book.toc === "ncx" ? ' toc="ncx"' : ""}>${names.map((_, i) => `<itemref idref="f${i + 1}"/>`).join("")}</spine></package>`,
+  };
+  if (book.toc === "nav") {
+    files["OEBPS/nav.xhtml"] = '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>c</title></head>'
+      + `<body><nav epub:type="toc">${navList(book.entries)}</nav></body></html>`;
+  } else {
+    files["OEBPS/toc.ncx"] = `<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>${navPoints(book.entries)}</navMap></ncx>`;
+  }
+  // Images below OEBPS/ by their name there (`images/a.png`); a chapter refers to one as `../images/a.png`
+  for (const [name, bytes] of Object.entries(book.images ?? {})) files[`OEBPS/${name}`] = bytes;
+  for (const name of names) {
+    files[`OEBPS/text/${name}`] = `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head><body>${book.files[name]}</body></html>`;
+  }
+  return zip(files);
 }
 
 /** An EPUB with *chapters* (XHTML body contents) in spine order, and a title. */

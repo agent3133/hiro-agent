@@ -196,7 +196,7 @@ async function testDraft(draft: ConnectionDraft, host: ProfilesHost,
     if (!key) return { ok: false, text: `There is no entry '${draft.key}' in the keychain on this device.` };
   }
   const answer = await host.probe(url, key ? { Authorization: `Bearer ${key}` } : undefined);
-  const verdict: { ok: boolean; text: string; models?: string[] } = testVerdict(url, answer, Boolean(key));
+  const verdict: { ok: boolean; text: string; models?: string[] } = testVerdict(url, answer, Boolean(key), draft.model);
   if (answer?.status === 200) {
     verdict.models = modelIds(answer.body);
     // Which kind of server it is, and the window it gives — what a message will use (#149)

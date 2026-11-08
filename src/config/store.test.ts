@@ -48,6 +48,27 @@ describe("test_server_config.py", () => {
     expect(merge({ a: { x: 1, y: 2 } }, { a: { x: null } })).toEqual({ a: { y: 2 } });
   });
 
+  it("leaves out a null inside a section that is new, at any depth", () => {
+    // A new connection's empty fields: stored as null, they failed the schema, so no connection could be added
+    expect(merge({}, { llm_profiles: { cloud: { provider: null, model: "m" } } }))
+      .toEqual({ llm_profiles: { cloud: { model: "m" } } });
+    expect(merge({ llm_profiles: { local: { model: "a" } } }, { llm_profiles: { cloud: { provider: null, base_url: null } } }))
+      .toEqual({ llm_profiles: { local: { model: "a" }, cloud: {} } });
+    expect(merge({}, { a: { b: { c: null, d: 1 } } })).toEqual({ a: { b: { d: 1 } } });
+  });
+
+  it("saves a new connection from the form on a vault without connections", async () => {
+    let stored: Record<string, unknown> = {};
+    const store = new ConfigStore(() => stored, async (values) => { stored = values; }, () => "C:/vault");
+    const result = await store.putConfig({ llm_profiles: { cloud: { provider: null, base_url: "https://api.openai.com/v1",
+                                                                      model: "gpt-6.1-sol", api_key: "${openai}" } },
+                                           default_llm_profile: "cloud" });
+    expect(result.fields).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(stored.llm_profiles).toEqual({ cloud: { base_url: "https://api.openai.com/v1", model: "gpt-6.1-sol",
+                                                   api_key: "${openai}" } });
+  });
+
   it("test_the_full_secret_never_leaves_the_process", async () => {
     const { store } = storeWith();
     const body = await store.config();

@@ -36,6 +36,27 @@ export function unzipText(data: Uint8Array, wanted: (name: string) => boolean,
   return texts;
 }
 
+/** The entries of *data* that *wanted* names, as bytes — a book's images for import_attachment (#331). */
+export function unzipBinary(data: Uint8Array, wanted: (name: string) => boolean,
+                            limit = MAX_UNPACKED): Map<string, Uint8Array> {
+  let total = 0;
+  let entries: Record<string, Uint8Array>;
+  try {
+    entries = unzipSync(data, {
+      filter: (file) => {
+        if (!wanted(file.name)) return false;
+        total += file.originalSize;
+        if (total > limit) throw new DocumentError(`its files unpack to more than ${Math.round(limit / 1_000_000)} MB`);
+        return true;
+      },
+    });
+  } catch (error) {
+    if (error instanceof DocumentError) throw error;
+    throw new DocumentError(`not a readable document (${error instanceof Error ? error.message : String(error)})`);
+  }
+  return new Map(Object.entries(entries));
+}
+
 /** *target* of a relationship, relative to the part *from* (`word/document.xml`), as a path inside the archive. */
 export function resolvePart(from: string, target: string): string {
   if (target.startsWith("/")) return target.slice(1);

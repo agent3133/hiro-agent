@@ -154,12 +154,21 @@ export function modelIds(body: unknown): string[] {
   const data = (body as { data?: { id?: unknown }[] } | null)?.data;
   return Array.isArray(data) ? data.map((item) => item?.id).filter((id): id is string => typeof id === "string") : [];
 }
-/** What a test's answer means, in words. *sentKey* says whether the key went with it. */
-export function testVerdict(url: string, answer: ProbeAnswer | null, sentKey: boolean): { ok: boolean; text: string } {
+/**
+ * What a test's answer means, in words. *sentKey* says whether the key went with it; *wanted* is the model the
+ * connection names, when it names one.
+ */
+export function testVerdict(url: string, answer: ProbeAnswer | null, sentKey: boolean,
+                            wanted = ""): { ok: boolean; text: string } {
   if (!answer) return { ok: false, text: `Nothing answered at ${url}: check the address, and that the server runs.` };
   if (answer.status === 200) {
-    const model = modelId(answer.body);
-    return { ok: true, text: `${sentKey ? "Works, and the key was accepted" : "Works"}${model ? `: it serves ${model}` : ""}.` };
+    const models = modelIds(answer.body);
+    // The model chosen, when the server lists it; a server of one model (llama.cpp) by that one; a provider of many
+    // by how many — its first is no more "the" model than any other (2026-10-08: OpenAI's first is not gpt-6.1-sol)
+    const serves = wanted && models.includes(wanted) ? `: it offers ${wanted}`
+      : models.length === 1 ? `: it serves ${models[0]}`
+      : models.length > 1 ? `: it offers ${models.length} models` : "";
+    return { ok: true, text: `${sentKey ? "Works, and the key was accepted" : "Works"}${serves}.` };
   }
   if (answer.status === 401 || answer.status === 403) {
     return { ok: false, text: sentKey ? `The server refused the key (HTTP ${answer.status}): check the keychain entry.`

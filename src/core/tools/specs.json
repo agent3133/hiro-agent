@@ -607,6 +607,37 @@
     }
   },
   {
+    "name": "import_attachment",
+    "description": "Copy an attachment's text into a note exactly as the file has it, instead of writing it out yourself: a book's chapters (EPUB), a Word, OpenDocument or PowerPoint file, a spreadsheet, a PDF's text layer, a text file. heading puts the text into that section of the note, replacing what the section held (a missing section is added); the note must exist — create it first, from its template. Without heading the text goes to the end of the note, which is created when it does not exist. A book's images are saved to the vault's attachment folder and embedded. The answer says where the text went, not the text itself: read what you need to summarise with read_attachment.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The attachment, as for read_attachment"
+        },
+        "note": {
+          "type": "string",
+          "description": "The note to write the text into"
+        },
+        "pages": {
+          "default": "",
+          "type": "string",
+          "description": "Chapters, PDF pages, sheets or slides, as for read_attachment ('3', '1-4', a chapter's part '3.2'); empty for all of it"
+        },
+        "heading": {
+          "default": "",
+          "type": "string",
+          "description": "The section to put the text in, e.g. 'Content'; empty for the end of the note"
+        }
+      },
+      "required": [
+        "path",
+        "note"
+      ]
+    }
+  },
+  {
     "name": "update_user_memory",
     "description": "Update a section of the persistent user profile with new information you've learned about the user. Use this when you discover facts worth remembering across sessions: preferences, identity, projects, communication style, or specific facts.",
     "parameters": {

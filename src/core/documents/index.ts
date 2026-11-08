@@ -5,11 +5,11 @@
  */
 
 import { DOCX_PARTS, docxToMarkdown } from "./docx";
-import { EPUB_PARTS, epubToMarkdown } from "./epub";
+import { EPUB_PARTS, epubImportText, epubToMarkdown } from "./epub";
 import { ODF_PARTS, odfToMarkdown } from "./odf";
 import { PPTX_PARTS, pptxToMarkdown } from "./pptx";
 import { XLSX_PARTS, xlsxToMarkdown } from "./xlsx";
-import { DocumentError, unzipText } from "./zip";
+import { DocumentError, unzipBinary, unzipText } from "./zip";
 
 const READERS: Record<string, { parts: (name: string) => boolean; read: (parts: Map<string, string>, pages: string) => string;
                                  what: string }> = {
@@ -49,6 +49,41 @@ export function readDocument(extension: string, bytes: Uint8Array, shown: string
     if (text.startsWith("Error:")) return text;
     // Macros in .docm/.xlsm/.pptm are never run: only the text is read
     return `${reader.what} '${shown}':\n\n${text || "(no text)"}`;
+  } catch (error) {
+    if (error instanceof DocumentError) return `Error: could not read '${shown}': ${error.message}`;
+    throw error;
+  }
+}
+
+/** What import_attachment writes for a document: its Markdown, and the images it embeds, by their file in the archive. */
+export interface ImportedDocument {
+  what: string;
+  text: string;
+  images: Map<string, Uint8Array>;
+}
+
+/** Image files an EPUB may embed; others stay out of the import. */
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg|bmp)$/i;
+
+/**
+ * The document *shown* as Markdown for a note (#331): the same reader as readDocument, without its heading and, for
+ * a book, the chapters *pages* picks whole, with their images; an "Error: …" line when it cannot be read.
+ */
+export function importDocument(extension: string, bytes: Uint8Array, shown: string, pages = ""): ImportedDocument | string {
+  const reader = READERS[extension];
+  // The old binary formats and unknown ones: the same answer readDocument gives, which reads no bytes for them
+  if (!reader) return readDocument(extension, bytes, shown);
+  try {
+    if (extension === "epub") {
+      const book = epubImportText(unzipText(bytes, reader.parts), pages);
+      if (typeof book === "string") return book;
+      const wanted = new Set(book.images.filter((path) => IMAGE_FILE.test(path)));
+      const images = wanted.size ? unzipBinary(bytes, (name) => wanted.has(name)) : new Map<string, Uint8Array>();
+      return { what: reader.what, text: book.text, images };
+    }
+    const text = reader.read(unzipText(bytes, reader.parts), pages);
+    if (text.startsWith("Error:")) return text;
+    return { what: reader.what, text, images: new Map() };
   } catch (error) {
     if (error instanceof DocumentError) return `Error: could not read '${shown}': ${error.message}`;
     throw error;

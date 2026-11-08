@@ -74,3 +74,13 @@ export function readableSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/**
+ * The vault file name for an image imported from a book: "<book> - <the image's own name>". The name comes from the
+ * book's archive, so it is the last part of the entry's path (split on both slashes) and has the characters a file
+ * name cannot hold replaced: an entry like "..\..\x.png" must not leave the folder it is saved in.
+ */
+export function importedImageName(bookBasename: string, archived: string): string {
+  const own = archived.split(/[\\/]/).pop() || "image";
+  return `${bookBasename} - ${own}`.replace(/[\\/:*?"<>|]/g, "_");
+}
