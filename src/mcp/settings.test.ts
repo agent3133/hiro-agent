@@ -116,9 +116,15 @@ describe("approvals", () => {
     expect(made.approved(SERVERS[1])).toBe(true);
   });
 
-  it("are not needed by an http server that sends no key", () => {
-    expect(approvals().approved({ ...SERVERS[1], headers: {} })).toBe(true);
-    expect(approvals().approved({ ...SERVERS[1], headers: { "X-Client": "hiro" } })).toBe(true);
+  it("are not needed by an http server on this computer that sends no key", () => {
+    expect(approvals().approved({ ...SERVERS[1], url: "http://127.0.0.1:8931/mcp", headers: {} })).toBe(true);
+    expect(approvals().approved({ ...SERVERS[1], url: "http://localhost:8931/mcp", headers: { "X-Client": "hiro" } }))
+      .toBe(true);
+  });
+
+  it("are needed by an http server on another computer, key or not: what its tools get goes there (#407)", () => {
+    expect(SERVERS[1].url).not.toMatch(/127\.0\.0\.1|localhost/);
+    expect(approvals().approved({ ...SERVERS[1], headers: {} })).toBe(false);
   });
 
   it("hold for an http server's address and headers: another address is asked for again", () => {

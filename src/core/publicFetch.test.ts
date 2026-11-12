@@ -3,7 +3,7 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { fetchPublic, isBlockedAddress, type FetchRules } from "./publicFetch";
+import { fetchPublic, isBlockedAddress, isTextType, type FetchRules } from "./publicFetch";
 
 describe("isBlockedAddress", () => {
   it.each(["127.0.0.1", "127.1.2.3", "10.0.0.1", "172.16.5.4", "172.31.255.255", "192.168.1.10", "169.254.169.254",
@@ -14,6 +14,20 @@ describe("isBlockedAddress", () => {
 
   it.each(["93.184.216.34", "1.1.1.1", "172.15.0.1", "172.32.0.1", "192.169.0.1", "2606:4700:4700::1111",
            "::ffff:93.184.216.34"])("%s is public", (address) => {
+    expect(isBlockedAddress(address)).toBe(false);
+  });
+
+  // The forms URL writes or other systems carry an IPv4 address in, judged by that address (#392)
+  it.each(["::ffff:7f00:1", "::ffff:c0a8:101", "::ffff:a9fe:a9fe", "::7f00:1", "::127.0.0.1", "64:ff9b::7f00:1",
+           "64:ff9b::10.0.0.1", "2002:7f00:1::", "2002:c0a8:101::1", "::ffff:0:7f00:1", "0:0:0:0:0:ffff:7f00:1",
+           "::FFFF:7F00:1", "fe80::1%eth0", "fec0::1", "2001:0:4136:e378::1", "64:ff9b:1::1", "100::1",
+           "2001:db8::1", "ff02::1", "fc00::1", "1:2:3:4:5:6:7:8:9", "1::2::3", "::ffff:300.1.1.1"])
+  ("%s is refused (#392)", (address) => {
+    expect(isBlockedAddress(address)).toBe(true);
+  });
+
+  it.each(["::ffff:808:808", "::ffff:8.8.8.8", "64:ff9b::808:808", "2002:808:808::1", "2606:4700::1111",
+           "2a00:1450:4001:82a::200e"])("%s is public (#392)", (address) => {
     expect(isBlockedAddress(address)).toBe(false);
   });
 });
@@ -32,6 +46,7 @@ describe("fetchPublic", () => {
         response.end(body);
       };
       if (request.url === "/page") send(200, { "Content-Type": "text/html" }, "<title>A page</title><p>hello</p>");
+      else if (request.url === "/file.pdf") send(200, { "Content-Type": "application/pdf", "Content-Length": "5000" }, "x".repeat(5000));
       else if (request.url === "/to-page") send(301, { Location: "/page" });
       else if (request.url === "/to-inside") send(302, { Location: `http://inside.example:${port}/secret` });
       else if (request.url === "/to-loopback") send(302, { Location: `http://127.0.0.2:${port}/secret` });
@@ -101,6 +116,13 @@ describe("fetchPublic", () => {
     expect(hits).toEqual([]);
   });
 
+  it("refuses loopback written as IPv4-mapped IPv6, without connecting (#392)", async () => {
+    hits = [];
+    await expect(fetchPublic(`http://[::ffff:127.0.0.1]:${port}/page`, options)).rejects.toThrow("(::ffff:7f00:1)");
+    await expect(fetchPublic(`http://[::ffff:7f00:1]:${port}/page`, options)).rejects.toThrow("on this computer or the local network");
+    expect(hits).toEqual([]);
+  });
+
   it("refuses the loopback address itself with the real rules", async () => {
     await expect(fetchPublic(`http://127.0.0.1:${port}/page`, options)).rejects.toThrow("local network (127.0.0.1)");
     await expect(fetchPublic(`http://localhost:${port}/page`, options)).rejects.toThrow("on this computer or the local network");
@@ -110,5 +132,31 @@ describe("fetchPublic", () => {
     const page = await fetchPublic(at("/big"), options, rules);
     expect(page.cut).toBe(true);
     expect(page.text).toHaveLength(1000);
+  });
+
+  it("leaves a body that is not text unread under textOnly, and gives its declared size (#417)", async () => {
+    const pdf = await fetchPublic(at("/file.pdf"), { ...options, maxBytes: 100_000, textOnly: true }, rules);
+    expect(pdf).toMatchObject({ binary: true, text: "", size: 5000 });
+    expect(pdf.status).toBe(200);
+  });
+
+  it("reads a non-text body as text when not textOnly", async () => {
+    const pdf = await fetchPublic(at("/file.pdf"), { ...options, maxBytes: 100_000 }, rules);
+    expect(pdf.binary).toBe(false);
+    expect(pdf.text).toHaveLength(5000);
+  });
+
+  it("still reads a text page under textOnly", async () => {
+    const page = await fetchPublic(at("/page"), { ...options, maxBytes: 100_000, textOnly: true }, rules);
+    expect(page.binary).toBe(false);
+    expect(page.text).toContain("hello");
+  });
+
+  it.each([
+    ["text/html; charset=utf-8", true], ["application/json", true], ["application/ld+json", true],
+    ["image/svg+xml", true], ["", true],
+    ["application/pdf", false], ["image/png", false], ["application/octet-stream", false],
+  ])("isTextType(%s) is %s", (contentType, expected) => {
+    expect(isTextType(contentType)).toBe(expected);
   });
 });

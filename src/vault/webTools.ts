@@ -58,25 +58,86 @@ function pageMarkdown(html: string): string {
   return title && !markdown.includes(title) ? `# ${title}\n\n${markdown}` : markdown;
 }
 
-export function makeWebTools(settings: WebSettings): Tool[] {
+/** A byte count as people read it: 812 bytes, 14 KB, 2.3 MB. */
+export function byteSize(bytes: number): string {
+  if (bytes < 1000) return `${bytes} bytes`;
+  if (bytes < 1_000_000) return `${Math.round(bytes / 1000)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/**
+ * Whether *error* is https failing to connect at all — refused, reset, or TLS that does not work there — after which
+ * an address the model gave as http:// is worth trying as it was given (#417). A refused address, a timeout or an
+ * HTTP error is not: those would fail, or mean the same, over http too.
+ */
+export function httpsFailedToConnect(error: unknown): boolean {
+  const code = String((error as { code?: unknown } | null)?.code ?? "");
+  return /^(ECONNREFUSED|ECONNRESET|EPROTO|EHOSTUNREACH|ENETUNREACH)$/.test(code)
+    || /^(ERR_SSL_|ERR_TLS_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/.test(code);
+}
+
+/** The host a page address names, as web_fetch asks about it (#403): lowercase, without a leading "www."; "" if none. */
+export function pageHost(url: string): string {
+  try {
+    return new URL(normalizeUrl(url)).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * web_fetch; with *hosts*, the hosts this conversation may open pages on (#403). Opening a page sends its address
+ * — and whatever a model put into it — to that host, so the first page on each host in a conversation is asked
+ * about, and the host is added once allowed. Without *hosts* (the prompt preview, `agent:tool`) it does not ask.
+ */
+export function makeWebTools(settings: WebSettings, hosts?: Set<string>): Tool[] {
   // Switched off in Features: not offered at all; the prompt says so (config/features.ts, #145)
   if (!settings.fetch.enabled) return [];
   const webFetch = defineTool("web_fetch", async (args) => {
-    const url = normalizeUrl(args.str("url"));
+    const given = args.str("url").trim();
+    const url = normalizeUrl(given);
+    // Running means allowed: asked about, or allowed before in this conversation
+    const host = pageHost(given);
+    if (hosts && host) hosts.add(host);
+    const options = {
+      timeoutMs: settings.fetch.timeoutSeconds * 1000, headers: { Accept: acceptHeader(args.str("format")) },
+      // Room for the markup a page loses on the way to Markdown; the text is cut to the limit afterwards
+      maxBytes: settings.fetch.maxContentLength * 4,
+      textOnly: true,
+    };
     try {
-      // Only pages on the internet: every address, redirects included, is checked before connecting (#138)
-      const response = await fetchPublic(url, {
-        timeoutMs: settings.fetch.timeoutSeconds * 1000, headers: { Accept: acceptHeader(args.str("format")) },
-        // Room for the markup a page loses on the way to Markdown; the text is cut to the limit afterwards
-        maxBytes: settings.fetch.maxContentLength * 4,
-      });
-      if (response.status >= 400) throw new Error(`HTTP ${response.status} for ${url}`);
+      // Only pages on the internet: every address, redirects included, is checked before connecting (#138).
+      // http:// is asked for as https first; a site without TLS is then asked once as given, under the same checks
+      let response;
+      let opened = url;
+      try {
+        response = await fetchPublic(url, options);
+      } catch (error) {
+        if (!/^http:\/\//i.test(given) || !httpsFailedToConnect(error)) throw error;
+        opened = url.replace(/^https:/i, "http:");
+        response = await fetchPublic(opened, options);
+      }
+      if (response.status >= 400) throw new Error(`HTTP ${response.status} for ${opened}`);
+      if (response.binary) {
+        const type = response.contentType.split(";")[0].trim() || "not text";
+        const size = response.size === null ? "of unknown size" : byteSize(response.size);
+        return `${opened} is ${type}, ${size}, not a page: web_fetch reads text only (web pages, Markdown, JSON, `
+          + "plain text). To use the file, ask the user to save it into the vault; read_attachment reads PDFs, "
+          + "documents and images there.";
+      }
       const type = response.contentType.toLowerCase();
       const content = type.includes("text/html") ? pageMarkdown(response.text) : response.text;
       return truncateContent(content, settings.fetch.maxContentLength);
     } catch (error) {
       return `Error: Could not fetch URL: ${error instanceof Error ? error.message : String(error)}`;
     }
+  }, {
+    destructiveWhen: async (args) => {
+      if (!hosts) return false;
+      const host = pageHost(args.str("url"));
+      return !host || !hosts.has(host);
+    },
+    confirmArgs: async (args) => ({ url: String(args.url ?? ""), host: pageHost(String(args.url ?? "")) }),
   });
 
   return [webFetch];

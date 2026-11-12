@@ -159,7 +159,7 @@ export function makePluginTools(app: App, vault: VaultPort, scope: string[] | nu
     // TaskNotes wrote the note, not the vault port: recorded here so undo covers it too (#164)
     if (where) {
       noteWrite();
-      recordChange({ op: "create", path: where, before: null, after: await vault.read(where).catch(() => null) });
+      recordChange(vault, { op: "create", path: where, before: null, after: await vault.read(where).catch(() => null) });
     }
     return `Created TaskNotes task '${title}'${where ? ` at '${where}'` : ""}`;
   });

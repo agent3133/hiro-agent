@@ -9,7 +9,7 @@
 import * as http from "node:http";
 import * as https from "node:https";
 
-import { certificateAuthorities } from "../core/tlsTrust";
+import { certificateAuthorities } from "../net/tlsTrust";
 
 export async function nodeFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
   const url = new URL(String(input));

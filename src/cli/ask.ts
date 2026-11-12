@@ -15,6 +15,7 @@
  */
 
 import type { ReadyInfo, TurnChanges, TurnHandlers } from "../api/types";
+import type { RunningAsks } from "./stop";
 
 export const DEFAULT_TIMEOUT_SECONDS = 600;
 
@@ -34,6 +35,8 @@ export interface AskHost {
   notice(text: string): void;
   /** A new conversation's name, from what was asked. */
   sessionName(prompt: string): string;
+  /** Where a running answer is listed for `agent:stop` (#415). */
+  running?: RunningAsks;
 }
 
 export interface AskParams {
@@ -78,8 +81,10 @@ export interface AskResult {
   refused: string[];
   /** Destructive tools that ran without anyone being asked (allow=destructive with the Developer setting). */
   unasked: string[];
-  /** The turn was stopped at the timeout. */
+  /** The turn was stopped: at the timeout, or by `agent:stop` (#415). */
   stopped: boolean;
+  /** What stopped it: "timeout", "agent:stop", or "" when it ran to its end. */
+  stopped_by: "" | "timeout" | "agent:stop";
   /** Whether the conversation was saved in .sessions/. */
   kept: boolean;
   calls: AskCall[];
@@ -102,7 +107,7 @@ export interface AskContext {
 
 function failure(error: string): AskResult {
   return { ok: false, reply: "", error, agent: "", connection: "", session: "", tool_calls: 0, seconds: 0, changed: [], turn: "",
-           refused: [], unasked: [], stopped: false, kept: false, calls: [],
+           refused: [], unasked: [], stopped: false, stopped_by: "", kept: false, calls: [],
            context: { window: 0, peak_tokens: 0, set_aside: 0, summarised: 0, service_tiers: {} } };
 }
 
@@ -138,8 +143,8 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
   const session = params.session || host.sessionName(prompt);
   const connection = params.connection || "";
   const shown = prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt;
-  host.notice(`Hiro Agent: a request from the terminal is running (${agent}) — "${shown}". Ctrl+C in the terminal does not `
-              + `stop it; it stops after ${timeout} s at the latest.`);
+  host.notice(`Hiro Agent: a request from the terminal is running (${agent}) — "${shown}", as "${session}". Ctrl+C in `
+              + `the terminal does not stop it; obsidian agent:stop does, and it stops after ${timeout} s at the latest.`);
 
   const refused: string[] = [];
   const unasked: string[] = [];
@@ -149,15 +154,20 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
   return new Promise<AskResult>((resolve) => {
     let reply = "";
     let stopped = false;
+    let stoppedBy: AskResult["stopped_by"] = "";
+    let forget = (): void => undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: Omit<AskResult, "agent" | "connection" | "session" | "refused" | "unasked" | "stopped"
-                                  | "seconds" | "kept" | "calls" | "context">):
+                                  | "stopped_by" | "seconds" | "kept" | "calls" | "context">):
         void => {
       if (timer !== undefined) clearTimeout(timer);
+      forget();
       const seconds = Math.round((Date.now() - started) / 100) / 10;
-      host.notice(`Hiro Agent: the request from the terminal ${stopped ? `was stopped after ${timeout} s` : result.ok ? "is done"
-                   : "failed"}${kept ? ` — saved as "${session}"` : ""}.`);
-      resolve({ ...result, agent, connection, session, refused, unasked, stopped, seconds, kept, calls, context });
+      const how = stoppedBy === "timeout" ? `was stopped after ${timeout} s`
+        : stoppedBy === "agent:stop" ? "was stopped with agent:stop" : result.ok ? "is done" : "failed";
+      host.notice(`Hiro Agent: the request from the terminal ${how}${kept ? ` — saved as "${session}"` : ""}.`);
+      resolve({ ...result, agent, connection, session, refused, unasked, stopped, stopped_by: stoppedBy, seconds, kept,
+                calls, context });
     };
     const context: AskContext = { window: 0, peak_tokens: 0, set_aside: 0, summarised: 0, service_tiers: {} };
     const handlers: TurnHandlers = {
@@ -205,10 +215,14 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
     const turn = host.send(prompt, { agent, session, profile: connection || undefined, keep: kept,
                                      context: note || selection ? { ...(note ? { active_note: note } : {}), ...(selection ? { selection } : {}) }
                                        : undefined }, handlers);
-    timer = setTimeout(() => {
+    const stopBy = (why: "timeout" | "agent:stop"): void => {
+      if (stopped) return;
       stopped = true;
+      stoppedBy = why;
       host.cancel(turn);
-    }, timeout * 1000);
+    };
+    timer = setTimeout(() => stopBy("timeout"), timeout * 1000);
+    forget = host.running?.add({ session, prompt, agent, started, stop: () => stopBy("agent:stop") }) ?? forget;
   });
 }
 
@@ -216,7 +230,10 @@ export async function ask(host: AskHost, params: AskParams): Promise<AskResult> 
 export function askText(result: AskResult): string {
   if (!result.ok) return `Error: ${result.error}`;
   const notes: string[] = [];
-  if (result.stopped) notes.push(`[stopped after the timeout; what was said so far is above]`);
+  if (result.stopped) {
+    notes.push(`[stopped ${result.stopped_by === "agent:stop" ? "with agent:stop" : "after the timeout"}; what was said `
+               + "so far is above]");
+  }
   for (const line of result.refused) notes.push(`[${line}]`);
   for (const line of result.unasked) notes.push(`[${line}]`);
   if (result.changed.length) notes.push(`[changed: ${result.changed.join(", ")}]`);

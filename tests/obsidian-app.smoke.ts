@@ -20,7 +20,9 @@ import { readFileSync } from "node:fs";
 const vault = process.argv[2];
 const parts = new Set(process.argv.slice(3));
 const DIR = "_agent-app-smoke";
-const HIDDEN = ".agent-app-smoke";
+// Listings walk only the plugin's own dot folders and the trash (#399): one inside them, and one they leave out
+const HIDDEN = ".tools/agent-app-smoke";
+const UNWALKED = ".agent-app-smoke";
 
 let failures = 0;
 function check(what: string, ok: boolean, detail = ""): void {
@@ -71,7 +73,7 @@ if (!run<boolean>("return Boolean(p)")) {
 }
 
 const cleanUp = (): void => {
-  run(`for (const dir of [${JSON.stringify(DIR)}, ${JSON.stringify(HIDDEN)}]) {
+  run(`for (const dir of [${JSON.stringify(DIR)}, ${JSON.stringify(HIDDEN)}, ${JSON.stringify(UNWALKED)}]) {
          if (await app.vault.adapter.exists(dir)) await app.vault.adapter.rmdir(dir, true); }
        return true;`);
 };
@@ -92,6 +94,11 @@ try {
         JSON.stringify(agents.map((a) => [a.name, a.default])));
   check("agent:list says where each agent comes from", agents.every((a) => ["bundled", "vault"].includes(a.source)),
         JSON.stringify(agents.map((a) => a.source)));
+  // agent:stop (#415) with no terminal answer running: an empty list, and nothing to stop
+  const running = json<{ ok: boolean; running: unknown[] }>(cli("agent:stop", "list", "format=json"));
+  check("agent:stop list answers JSON with no answer running", running?.ok === true && running.running.length === 0,
+        JSON.stringify(running));
+  check("agent:stop with nothing running says so", cli("agent:stop").includes("No answer from the terminal is running."));
   const sessions = json<{ name: string; updated: string }[]>(cli("agent:sessions", "format=json"));
   check("agent:sessions answers a list, newest first", Array.isArray(sessions)
         && sessions.every((s, i) => i === 0 || sessions[i - 1].updated >= s.updated), JSON.stringify(sessions)?.slice(0, 200));
@@ -114,7 +121,7 @@ try {
 
   // --- The vault port (vault/obsidianVault.ts) ---------------------------------------------------------------------
   const port = run<Record<string, unknown>>(`
-    const v = p.inProcess.vault, a = ${JSON.stringify(DIR)}, h = ${JSON.stringify(HIDDEN)}, out = {};
+    const v = p.inProcess.vault, a = ${JSON.stringify(DIR)}, h = ${JSON.stringify(HIDDEN)}, u = ${JSON.stringify(UNWALKED)}, out = {};
     await v.write(a + "/Sub/One.md", "one");
     out.read = await v.read(a + "/Sub/One.md");
     out.isFile = await v.isFile(a + "/Sub/One.md");
@@ -134,8 +141,11 @@ try {
     }
     await v.write(h + "/hidden.md", "dot");
     out.hidden = await v.read(h + "/hidden.md");
+    await v.write(u + "/other.md", "other");
     const files = await v.files();
     out.listsHidden = files.includes(h + "/hidden.md");
+    out.listsUnwalked = files.some((f) => f.startsWith(u + "/"));
+    await v.remove(u + "/other.md");
     out.listsConfig = files.some((f) => f.startsWith(app.vault.configDir + "/"));
     out.sorted = files.every((f, i) => i === 0 || files[i - 1] <= f);
     const left = out.hiddenWindow ? a + "/Sub/One.md" : a + "/Moved/Two.md";
@@ -156,7 +166,8 @@ try {
     check("move takes the note to a new folder", port.movedFrom === false && port.movedTo === "two");
   }
   check("a dot folder is written through the adapter", port.hidden === "dot");
-  check("files() lists dot folders but never Obsidian's own folder", port.listsHidden === true && port.listsConfig === false);
+  check("files() lists the plugin's dot folders but never Obsidian's own folder", port.listsHidden === true && port.listsConfig === false);
+  check("…nor another dot folder (#399)", port.listsUnwalked === false);
   check("files() is sorted", port.sorted === true);
   check("remove deletes, in and outside the index", port.removed === true);
   check("reading a note that is not there throws", port.missing === "threw");
@@ -299,8 +310,12 @@ try {
     check("…and keep=false saves no conversation", answer?.kept === false);
     // Taken back from the terminal, as a user would (#302): the diff first, then the undo
     check("…and names the answer for agent:undo", Boolean(answer?.turn), JSON.stringify(answer?.turn));
+    // Undo outlives a restart (#410): the plugin is reloaded between the answer and taking it back
+    cli("plugin:reload", "id=agent");
+    run<boolean>("for (let i = 0; i < 50 && !app.plugins.plugins.agent?.inProcess; i++) await w(100); return true;");
     const listed = cli("agent:undo", "list");
-    check("agent:undo list shows the answer", Boolean(answer?.turn) && listed.includes(answer!.turn), listed.slice(0, 300));
+    check("agent:undo list shows the answer after a plugin reload (#410)", Boolean(answer?.turn)
+          && listed.includes(answer!.turn), listed.slice(0, 300));
     const dry = json<{ ok: boolean; files: string[]; diff: string }>(cli("agent:undo", `turn=${answer?.turn ?? ""}`, "dry",
                                                                         "format=json"));
     check("agent:undo dry shows its diff, with what the agent wrote", Boolean(dry?.files.includes(note))

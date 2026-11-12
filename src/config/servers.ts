@@ -21,6 +21,8 @@ export interface ServerFacts {
   contextWindow?: number;
   /** Whether the chat template can think (llama.cpp only). */
   thinking?: boolean;
+  /** How many requests it serves at once (llama.cpp's `total_slots`, #206). */
+  slots?: number;
 }
 
 /** GET a URL's JSON; throws, or returns null, when nothing usable answers. */
@@ -81,7 +83,8 @@ export async function detectServer(address: string, get: GetJson, model = ""): P
     const settings = record(props.default_generation_settings);
     return { kind: "llama.cpp", models,
              contextWindow: positive(settings.n_ctx) ?? positive(record(settings.params).n_ctx),
-             thinking: Boolean(record(props.chat_template_caps).supports_preserve_reasoning) };
+             thinking: Boolean(record(props.chat_template_caps).supports_preserve_reasoning),
+             slots: positive(props.total_slots) };
   }
 
   if (typeof record(await tryGet(get, `${root}/api/version`)).version === "string") {

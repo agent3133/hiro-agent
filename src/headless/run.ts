@@ -11,6 +11,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { runTurn } from "../core/agentLoop";
+import { setHttpPort } from "../core/http";
+import { nodeHttp } from "../net/nodeHttp";
 import { OpenAiChat } from "../core/llm/openaiChat";
 import { nodeVault } from "../core/nodeVault";
 import { promptContext, renderPrompt } from "../core/prompt";
@@ -20,6 +22,9 @@ const DEFAULT_PROMPT = `You are an assistant for the Obsidian vault at {{ vault_
 Use the tools to look things up in the vault before answering, and answer briefly.`;
 
 /** Options that take no value. */
+// In Node, as in the desktop app: the core's network port on Node's http/https (#418)
+setHttpPort(nodeHttp);
+
 const FLAGS = ["allow-destructive"];
 
 function parseArgs(argv: string[]): { options: Map<string, string>; question: string } {

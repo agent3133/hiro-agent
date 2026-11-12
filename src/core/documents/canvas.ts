@@ -25,14 +25,21 @@ interface CanvasEdge {
 
 /** The canvas *shown*, from its JSON *text*, as Markdown; an "Error: …" line for one that cannot be read. */
 export function canvasToMarkdown(shown: string, text: string): string {
-  let data: { nodes?: CanvasNode[]; edges?: CanvasEdge[] };
+  let data: unknown;
   try {
-    data = JSON.parse(text || "{}") as typeof data;
+    data = JSON.parse(text || "{}");
   } catch {
     return `Error: '${shown}' is not a readable canvas (its JSON is broken)`;
   }
-  const nodes = (data.nodes ?? []).filter((node) => node && typeof node.id === "string");
-  const edges = (data.edges ?? []).filter((edge) => edge && edge.fromNode && edge.toNode);
+  // JSON that is not a canvas — null, a list, nodes that are no list — is said, not thrown (#385)
+  const { nodes: rawNodes = [], edges: rawEdges = [] } = (data ?? {}) as { nodes?: unknown; edges?: unknown };
+  if (typeof data !== "object" || data === null || Array.isArray(data) || !Array.isArray(rawNodes) || !Array.isArray(rawEdges)) {
+    return `Error: '${shown}' is not a readable canvas (its JSON holds no list of cards)`;
+  }
+  const number0 = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const nodes = (rawNodes as CanvasNode[]).filter((node) => node && typeof node === "object" && typeof node.id === "string")
+    .map((node) => ({ ...node, x: number0(node.x), y: number0(node.y), width: number0(node.width), height: number0(node.height) }));
+  const edges = (rawEdges as CanvasEdge[]).filter((edge) => edge && typeof edge === "object" && edge.fromNode && edge.toNode);
   const groups = nodes.filter((node) => node.type === "group");
   const cards = nodes.filter((node) => node.type !== "group")
     .sort((a, b) => (a.y - b.y) || (a.x - b.x));

@@ -2,7 +2,7 @@
 
 Hiro Agent's main.js bundles the packages below. Each is used under its own license, reproduced here.
 
-## @modelcontextprotocol/sdk 1.31.0 (MIT)
+## @modelcontextprotocol/sdk 1.32.2 (MIT)
 
 ```
 MIT License
@@ -185,7 +185,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## fast-uri 3.1.8 (BSD-3-Clause)
+## fast-uri 3.1.9 (BSD-3-Clause)
 
 ```
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -398,7 +398,7 @@ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
 ```
 
-## zod 4.6.5 (MIT)
+## zod 4.6.7 (MIT)
 
 ```
 MIT License

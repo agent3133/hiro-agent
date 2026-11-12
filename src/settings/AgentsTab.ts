@@ -39,6 +39,11 @@ export interface AgentsHost {
   redraw(): void;
   /** The agent's system prompt as its next turn would send it, with the editor's unsaved changes (#67). */
   preview(name: string, draft: PromptDraft): Promise<PromptAsSent>;
+  /**
+   * Whether calls of an MCP server's *tool* ask first, for every agent (#403): saved with the server's settings
+   * (`ask_first`). True when saved.
+   */
+  setAskFirst?(server: string, tool: string, ask: boolean): Promise<boolean>;
 }
 
 /**
@@ -276,7 +281,15 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
   const toolsSlot = pane.createDiv();
   const drawTools = (): void => {
     toolsSlot.empty();
-    renderTools(toolsSlot, draft, catalog, touch, drawTools, state.unfolded);
+    // An MCP tool's Ask first is the server's setting, for every agent: saved at once, then the page is drawn again
+    // from the tools as they now ask (#403); the editor's unsaved edits survive the redraw (#181)
+    const setAskFirst = host.setAskFirst;
+    const askFirst = setAskFirst ? async (tool: string, ask: boolean): Promise<void> => {
+      const at = tool.indexOf("__");
+      if (at <= 0) return;
+      if (await setAskFirst(tool.slice(0, at), tool.slice(at + 2), ask)) host.redraw();
+    } : undefined;
+    renderTools(toolsSlot, draft, catalog, touch, drawTools, state.unfolded, askFirst);
   };
   const drawFolders = (): void => {
     folders.querySelectorAll(".obsidian-agent-folder").forEach((element) => element.remove());
@@ -342,7 +355,8 @@ async function renderEditor(pane: HTMLElement, name: string, catalog: ToolInfo[]
  * out: they are withheld from a folder-restricted agent, and the card says so.
  */
 function renderTools(slot: HTMLElement, draft: AgentFields, catalog: ToolInfo[], touch: () => void,
-                     redraw: () => void, unfolded: Set<string>): void {
+                     redraw: () => void, unfolded: Set<string>,
+                     askFirst?: (tool: string, ask: boolean) => Promise<void>): void {
   const scoped = draft.vault_scope.length > 0;
   // mcp:* gives the agent every MCP tool, so while it is on, each server's tools show as on — never "off" while
   // the agent can in fact call them. Switching one off spells mcp:* out: every other MCP tool, listed by name
@@ -437,6 +451,16 @@ function renderTools(slot: HTMLElement, draft: AgentFields, catalog: ToolInfo[],
               describe();
               setGroup(usable.length > 0 && on() === usable.length);
             }));
+        // An MCP tool: whether its calls ask first, whatever the server says of it (#403)
+        if (askFirst && isMcpToolName(tool.name) && tool.name !== ALL_MCP_TOOLS) {
+          single.descEl.createSpan({ cls: "obsidian-agent-ask-first",
+                                     text: tool.destructive ? " Asks before each call." : " Runs without asking." });
+          single.addExtraButton((button) => button
+            .setIcon(tool.destructive ? "shield-check" : "shield-off")
+            .setTooltip(tool.destructive ? "Ask first is on, for every agent: switch it off to let calls run without asking"
+              : "Ask first is off: switch it on to be asked before each call, for every agent")
+            .onClick(() => void askFirst(tool.name, !tool.destructive)));
+        }
         if (withheld || tool.off_in) single.settingEl.addClass("is-disabled");
       }
     };

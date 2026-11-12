@@ -8,7 +8,7 @@
 
 import { type App, TFile } from "obsidian";
 
-import { BASE_SYNTAX, embeddedBases, prepareBase, rowsTable } from "../core/baseDefinition";
+import { BASE_SYNTAX, countTable, embeddedBases, filterHints, prepareBase, rowsTable, withColumn } from "../core/baseDefinition";
 import { getCloseMatches } from "../core/difflib";
 import { defineTool, type Tool } from "../core/tools/tool";
 import { basesAvailable, runBase } from "./basesQuery";
@@ -16,6 +16,26 @@ import { windowHidden } from "./obsidianVault";
 
 /** Rows shown when the call names no limit. */
 const DEFAULT_LIMIT = 50;
+/** From this many rows on, the answer names count_by (#267). */
+const COUNT_HINT_ROWS = 20;
+
+/** The values a note property takes across the vault's notes, with how many notes have each (#389). */
+function propertyValues(app: App, property: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const file of app.vault.getMarkdownFiles()) {
+    const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!frontmatter) continue;
+    const key = Object.keys(frontmatter).find((k) => k.toLowerCase() === property);
+    if (key === undefined) continue;
+    const value: unknown = frontmatter[key];
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (item === null || item === undefined || item === "") continue;
+      const text = typeof item === "object" ? JSON.stringify(item) : String(item);
+      counts.set(text, (counts.get(text) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
 
 /** The `.base` file *path* names: as given, with `.base` added, or found by its name anywhere in the vault. */
 function findBase(app: App, path: string): TFile | null {
@@ -92,9 +112,10 @@ export function makeBasesTools(app: App, scope: string[] | null): Tool[] {
     if (note && !/\.md$/i.test(note)) note = `${note}.md`;
     const prepared = prepareBase(source, args.str("view"), note || embeddedIn || (path ? label : ""));
     if (typeof prepared === "string") return prepared;
+    const countBy = args.str("count_by").trim();
     let result;
     try {
-      result = await runBase(app, prepared.yaml);
+      result = await runBase(app, countBy ? withColumn(prepared.yaml, countBy) : prepared.yaml);
     } catch (error) {
       const why = `Error: the Base could not be run: ${error instanceof Error ? error.message : String(error)}`;
       return definition ? `${why}\n\n${BASE_SYNTAX}` : why;
@@ -104,10 +125,25 @@ export function makeBasesTools(app: App, scope: string[] | null): Tool[] {
     const rows = result.groups.length ? result.rows.map((row, i) => [result.groups[i], ...row]) : result.rows;
     const head = `${label === "the definition given" || embeddedIn ? `Base ${label}` : `Base '${label}'`}, view '${prepared.view}' — `
       + `${rows.length} row${rows.length === 1 ? "" : "s"}`;
-    if (rows.length) return `${head}:\n\n${rowsTable(columns, rows, limit)}`;
+    // A definition the model wrote: what is wrong with its filters, and when nothing matched, the values the
+    // properties it compares really take (#389). A saved Base's filters are the user's
+    const hints = definition ? filterHints(definition, rows.length > 0, (property) => propertyValues(app, property)) : "";
+    const withHints = (text: string): string => (hints ? `${text}\n\n${hints}` : text);
+    if (rows.length && countBy) {
+      const counted = countTable(result.columns, result.ids, result.cells, countBy);
+      return counted.startsWith("Error:") ? counted : withHints(`${head}, counted by ${countBy}:\n\n${counted}`);
+    }
+    if (rows.length) {
+      // Many rows: a model counting them by hand miscounts (#267), so name the way to count them
+      const many = rows.length > COUNT_HINT_ROWS && result.ids.length > 1
+        ? `\n\n[To count the rows per value of a column, call again with count_by, e.g. count_by: "${result.ids[result.ids.length - 1]}"]`
+        : "";
+      return withHints(`${head}:\n\n${rowsTable(columns, rows, limit)}${many}`);
+    }
     // A definition the model wrote that matches nothing is often a filter written wrong: say how they are written.
     // A saved Base's filters are the user's, and matching nothing is an answer
-    return definition ? `${head}: no note matches its filters. If some should, check how they are written.\n\n${BASE_SYNTAX}`
+    return definition
+      ? withHints(`${head}: no note matches its filters. If some should, check how they are written.\n\n${BASE_SYNTAX}`)
       : `${head}: no note matches its filters`;
   });
 

@@ -1,5 +1,8 @@
 // MCP servers as the plugin runs them (#87), against a real server: over stdio as a child process, and over
 // streamable HTTP on a local port.
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -121,6 +124,27 @@ describe("a stdio server", () => {
     await made.sync([stdio({ args: [SERVER, "x"] })]);
     await made.tools(stdio({ args: [SERVER, "x"] }));
     expect(log.filter((line) => line.startsWith("MCP: starting"))).toHaveLength(2);
+  }, 30_000);
+
+  it("starts a bare command from PATH, not a file of that name in the vault (#391)", async () => {
+    const vault = mkdtempSync(join(tmpdir(), "mcp-vault-"));
+    try {
+      const marker = join(vault, "planted-ran");
+      // What a synced vault could hold: node.cmd (Windows) and node (elsewhere) that leave a marker
+      writeFileSync(join(vault, "node.cmd"), `@echo off\r\necho x> "${marker}"\r\n`);
+      writeFileSync(join(vault, "node"), `#!/bin/sh\necho x > "${marker}"\n`, { mode: 0o755 });
+      const { host, log } = hostWith();
+      host.vaultPath = () => vault;
+      const spec = mcpServers({ mcp_servers: { local: { transport: "stdio", command: "node", args: [SERVER] } } })[0];
+      const made = manager(host);
+      expect(await made.call(spec, "echo", { text: "hi" })).toBe("echo: hi");
+      await made.closeAll();
+      expect(existsSync(marker)).toBe(false);
+      expect(log.find((line) => line.startsWith("MCP: 'node' is "))).not.toContain(vault);
+    } finally {
+      // The server's working folder: Windows lets it go a moment after the process ends
+      rmSync(vault, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   }, 30_000);
 
   it("says why a program that does not exist did not start", async () => {

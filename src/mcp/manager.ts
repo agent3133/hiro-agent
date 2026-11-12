@@ -16,7 +16,8 @@ import { messageOf } from "../core/errors";
 import type { ContentPart } from "../core/llm/openaiChat";
 import { programEnv } from "../core/programPath";
 import type { Tool, ToolSpec } from "../core/tools/tool";
-import { commandLine, McpConfigError, type McpServerSpec, needsApproval, passesFilter, resolveSpec, TOOL_SEPARATOR } from "./servers";
+import { childEnv, resolveCommand } from "./command";
+import { asksFirst, commandLine, McpConfigError, type McpServerSpec, needsApproval, passesFilter, resolveSpec, TOOL_SEPARATOR } from "./servers";
 
 /** What the manager needs from the plugin. */
 export interface McpHost {
@@ -97,6 +98,11 @@ export class McpManager {
     return specs.flatMap((spec) => (this.listed.get(spec.name) ?? [])
       .filter((tool) => passesFilter(spec, tool.name))
       .map((tool) => this.asTool(spec, { ...tool, server: spec.name })));
+  }
+
+  /** Whether the server's tools have been listed on this device: by a turn, a Test, or remembered (#403). */
+  isListed(name: string): boolean {
+    return this.listed.has(name);
   }
 
   /** The server's tools, as it names them, after its `tools_filter`. Connects when not connected. */
@@ -215,9 +221,16 @@ export class McpManager {
       // The SDK's safe environment (PATH, HOME, …) plus the server's own env, nothing else of Obsidian's; on macOS
       // PATH gains Homebrew's folders (#124), where npx and the node it runs usually are
       const path = programEnv(process.env, process.platform)?.PATH;
-      const env = path && !("PATH" in resolved.env) ? { PATH: path, ...resolved.env } : resolved.env;
+      const env = childEnv(path && !("PATH" in resolved.env) ? { PATH: path, ...resolved.env } : resolved.env,
+                           process.platform);
+      // The program on PATH, never one of the same name in the vault, which is the server's working folder (#391)
+      const command = resolveCommand(spec.name, resolved.command, {
+        path: env.PATH ?? process.env.PATH, pathext: process.env.PATHEXT, platform: process.platform,
+        vaultPath: this.host.vaultPath(),
+      });
+      if (command !== resolved.command) this.host.log(`MCP: '${resolved.command}' is ${command}`);
       const stdio = new StdioClientTransport({
-        command: resolved.command, args: resolved.args, env, cwd: this.host.vaultPath() || undefined,
+        command, args: resolved.args, env, cwd: this.host.vaultPath() || undefined,
         stderr: "pipe",
       });
       stdio.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-STDERR_KEPT); });
@@ -258,7 +271,8 @@ export class McpManager {
       name: `${spec.name}${TOOL_SEPARATOR}${tool.name}`,
       description: tool.description,
       parameters,
-      destructive: tool.destructive,
+      // tool.destructive is what the server's hints say; the user's Ask first, and http, decide over it (#403)
+      destructive: asksFirst(spec, tool.name, tool.destructive),
       run: async (args) => {
         const answer = await call(args);
         return typeof answer === "string" ? answer : answer.map((part) => (part.type === "text" ? part.text : "[image]")).join("\n");

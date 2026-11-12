@@ -114,6 +114,133 @@ export function prepareBase(definition: string, viewName = "", note = ""): Prepa
   return { yaml: stringify({ ...base, views: [{ ...chosen, type: QUERY_VIEW_TYPE, name: view }] }), view };
 }
 
+/** A property as a filter or count_by names it, for comparing names: `note.status` and `status` are one. */
+export function propertyKey(name: string): string {
+  return name.trim().toLowerCase().replace(/^(note|file\.frontmatter|frontmatter|file\.properties)\./, "");
+}
+
+/**
+ * *prepared* (prepareBase's YAML) with *property* among its view's columns, so that the query's result carries it
+ * for count_by (#267); unchanged when the view shows it already.
+ */
+export function withColumn(prepared: string, property: string): string {
+  const data = parse(prepared) as Record<string, unknown>;
+  const view = (data.views as Record<string, unknown>[])[0];
+  const order = Array.isArray(view.order) ? view.order.map(String) : [];
+  if (order.some((p) => propertyKey(p) === propertyKey(property))) return prepared;
+  // A view without order shows the Base's first properties; keep them, and add the one counted
+  view.order = [...(order.length ? order : ["file.name"]), property.trim()];
+  return stringify(data);
+}
+
+/**
+ * The rows counted per value of one column (#267, #389): models that count 85 rows by hand get it wrong, differently
+ * each time. *cells* holds each row's values, one per column, a list property's items each on their own. The rows'
+ * count per value, the most first; or an error naming the columns when *by* is none of them.
+ */
+export function countTable(columns: string[], ids: string[], cells: string[][][], by: string): string {
+  const wanted = propertyKey(by);
+  const index = ids.findIndex((id, i) => propertyKey(id) === wanted || propertyKey(columns[i] ?? "") === wanted);
+  if (index < 0) {
+    return `Error: the result has no column '${by}' to count by; its columns: ${columns.map((c) => `'${c}'`).join(", ")}`;
+  }
+  const counts = new Map<string, number>();
+  let several = false;
+  for (const row of cells) {
+    const items = [...new Set(row[index] ?? [])];
+    if (items.length > 1) several = true;
+    for (const item of items.length ? items : ["(empty)"]) counts.set(item, (counts.get(item) ?? 0) + 1);
+  }
+  // The most first; rows without a value last, as what is left over
+  const empty = counts.get("(empty)");
+  counts.delete("(empty)");
+  const sorted = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (empty) sorted.push(["(empty)", empty]);
+  return rowsTable([columns[index], "rows"], sorted.map(([value, n]) => [value, String(n)]), sorted.length)
+    + (several ? "\n\nA row with several values is counted once under each of them." : "");
+}
+
+/** The filter expressions of a definition: every string under a filters key, in and/or/not lists too. */
+export function filterExpressions(definition: string): string[] {
+  let data: unknown;
+  try {
+    data = parse(unfenced(definition));
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  const strings = (value: unknown): void => {
+    if (typeof value === "string") found.push(value);
+    else if (Array.isArray(value)) value.forEach(strings);
+    else if (value && typeof value === "object") Object.values(value).forEach(strings);
+  };
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) (key === "filters" ? strings : walk)(item);
+    }
+  };
+  walk(data);
+  return found;
+}
+
+/**
+ * The quoted strings in *expression* that stand as a condition of their own — `file.hasTag("task") && "open"` —
+ * which every note passes (#389): not an argument of a call, and not one side of a comparison.
+ */
+export function bareStrings(expression: string): string[] {
+  const found: string[] = [];
+  for (const match of expression.matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) {
+    const before = expression.slice(0, match.index).trimEnd();
+    const after = expression.slice(match.index + match[0].length).trimStart();
+    const opens = before === "" || /(&&|\|\||!)$/.test(before) || (/\($/.test(before) && !/[\w.]\s*\($/.test(before));
+    const closes = after === "" || /^(&&|\|\||\))/.test(after);
+    if (opens && closes) found.push(match[1] ?? match[2]);
+  }
+  return found;
+}
+
+/** The property comparisons in *expression* with a quoted value: `status == "open"`, and `status = "open"` too. */
+export function comparisons(expression: string): { property: string; op: string; value: string }[] {
+  return [...expression.matchAll(/([A-Za-z_][\w.]*)\s*(==|!=|=)\s*(["'])(.*?)\3/g)]
+    .map((m) => ({ property: m[1], op: m[2], value: m[4] }));
+}
+
+/**
+ * What to say about a definition's filters (#389), after the rows: a string standing as a condition, a comparison
+ * written with one =, and — when nothing matched — the values each compared property really takes in the vault,
+ * from *valuesOf* (empty: no note has it). Empty when there is nothing to say.
+ */
+export function filterHints(definition: string, matched: boolean,
+                            valuesOf: (property: string) => Map<string, number>): string {
+  const hints: string[] = [];
+  const expressions = filterExpressions(definition);
+  for (const text of new Set(expressions.flatMap(bareStrings))) {
+    hints.push(`The filter "${text}" is a string on its own, which every note passes. To compare a property, write `
+      + `it with the value, e.g. 'status == "${text}"'.`);
+  }
+  const compared = expressions.flatMap(comparisons);
+  for (const c of compared.filter((c) => c.op === "=")) {
+    hints.push(`Compare with ==, not =: '${c.property} == "${c.value}"'.`);
+  }
+  if (!matched) {
+    const seen = new Set<string>();
+    for (const { property } of compared) {
+      const key = propertyKey(property);
+      if (seen.has(key) || key.startsWith("file.") || key === "this") continue;
+      seen.add(key);
+      const values = [...valuesOf(key)].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const named = /^(file\.frontmatter|frontmatter|file\.properties)\./i.test(property)
+        ? ` (write it as ${key} or note.${key})` : "";
+      hints.push(values.length
+        ? `${key} takes these values in the vault${named}: ${values.slice(0, 10).map(([v, n]) => `"${v}" (${n})`).join(", ")}`
+          + (values.length > 10 ? `, and ${values.length - 10} more` : "") + "."
+        : `No note in the vault has a property ${key}${named}.`);
+    }
+  }
+  return hints.join("\n");
+}
+
 /** The rows of a query's result, as the model reads them: a Markdown table, cut at *limit* rows. */
 export function rowsTable(columns: string[], rows: string[][], limit: number): string {
   const cell = (text: string): string => text.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ").trim();

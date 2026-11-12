@@ -418,6 +418,15 @@
           },
           "title": "Tools Filter",
           "type": "array"
+        },
+        "ask_first": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "default": {},
+          "description": "Per tool, whether a call asks first: true asks even for a tool the server calls read-only, false never asks. A tool not named here asks as the server's hints say, and always for an http server. Set in Settings → Hiro Agent → Agents.",
+          "title": "Ask First",
+          "type": "object"
         }
       },
       "required": [
@@ -431,7 +440,7 @@
       "properties": {
         "enabled": {
           "default": false,
-          "description": "Keep a profile of you that the agent reads at the start of each conversation.",
+          "description": "Keep a profile of you that the agent reads at the start of each conversation. The built-in assistant reads and updates it; another agent does when its tools include the memory tools (Settings → Hiro Agent → Agents). Edit it yourself with the command Edit the memory profile.",
           "title": "Enabled",
           "type": "boolean"
         },
@@ -476,6 +485,12 @@
           "default": false,
           "description": "Save the agent's tool calls with each kept conversation, to check later what it did. Notes get longer.",
           "title": "Save Tool Calls",
+          "type": "boolean"
+        },
+        "keep_tool_results": {
+          "default": false,
+          "description": "The agent remembers what its tools returned in earlier answers of a conversation, so a follow-up can use what it read without reading it again. The conversation fills the model's context window sooner and is summarised earlier; a reopened conversation starts without them.",
+          "title": "Keep Tool Results",
           "type": "boolean"
         }
       },

@@ -3,9 +3,10 @@
  * (without Obsidian's index; the test port has none). Same results, snippets and limits.
  */
 
-import { normalize, scopeHint } from "../paths";
+import { scopeHint } from "../paths";
 import type { VaultPort } from "../vault";
 import { defineTool, type Tool } from "./tool";
+import { Scope } from "../scope";
 
 const TAG_PATTERN = /(?:^|\s)#([A-Za-z0-9_][A-Za-z0-9_/-]*)/g;
 
@@ -52,20 +53,76 @@ function walkOrder(files: string[]): string[] {
   });
 }
 
+/**
+ * The terms of a query (#416): its words, any order, and a "quoted phrase" as one term. Lowercase; an empty query has
+ * none. One word is the substring search it always was.
+ */
+export function queryTerms(query: string): string[] {
+  const terms: string[] = [];
+  // In the order typed: a "quoted phrase" or a word; a stray quote is dropped
+  for (const match of query.matchAll(/"([^"]+)"|(\S+)/g)) {
+    const term = (match[1] ?? match[2]).replace(/"/g, "").trim().toLowerCase();
+    if (term) terms.push(term);
+  }
+  return [...new Set(terms)];
+}
+
+/** How many matching lines a note's result shows. */
+const HITS_PER_NOTE = 3;
+/** Characters around a term in a hit. */
+const AROUND = 60;
+
+/**
+ * A note's matching lines (#416): each line holding a term, with its number and the text around the first term in
+ * it, up to *most*. Small models picked the first hit they saw; several, with their lines, show which part of the
+ * note matters, and where to read.
+ */
+export function hitLines(content: string, terms: string[], most = HITS_PER_NOTE): { line: number; text: string }[] {
+  const hits: { line: number; text: string }[] = [];
+  const lines = content.split(/\r?\n/);
+  for (let index = 0; index < lines.length && hits.length < most; index++) {
+    const line = lines[index];
+    const lower = line.toLowerCase();
+    const at = terms.map((term) => lower.indexOf(term)).filter((i) => i >= 0).sort((a, b) => a - b)[0];
+    if (at === undefined) continue;
+    const start = Math.max(0, at - AROUND);
+    const end = Math.min(line.length, at + AROUND * 2);
+    hits.push({ line: index + 1,
+                text: `${start > 0 ? "…" : ""}${line.slice(start, end).trim()}${end < line.length ? "…" : ""}` });
+  }
+  return hits;
+}
+
+/**
+ * How well a note matches, for the order of the results (#416): the whole query as it was typed, then the terms in
+ * the note's name, then how many lines match. Higher first.
+ */
+export function relevance(path: string, content: string, query: string, terms: string[]): number {
+  const lower = content.toLowerCase();
+  const name = path.toLowerCase().slice(path.lastIndexOf("/") + 1);
+  const phrase = query.trim().toLowerCase().replace(/"/g, "");
+  let score = terms.length > 1 && phrase && lower.includes(phrase) ? 1000 : 0;
+  score += terms.filter((term) => name.includes(term)).length * 100;
+  score += Math.min(99, lower.split("\n").filter((line) => terms.some((term) => line.includes(term))).length);
+  return score;
+}
+
 export function makeSearchTools(vault: VaultPort, scope: string[] | null = null): Tool[] {
   const searchVault = defineTool("search_vault", async (args) => {
     const query = args.str("query");
     const limit = args.int("limit");
-    const queryLower = query.toLowerCase();
+    const terms = queryTerms(query);
+    const byModified = args.str("sort").toLowerCase() === "modified";
     const wantedTag = args.str("tag").trim().replace(/^#+/, "").toLowerCase();
     const wantedFolder = args.str("folder").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
     if (!query && !wantedTag && !wantedFolder) return "Error: give a query, a tag, or a folder";
 
-    const roots = scope && scope.length
-      ? scope.map((s) => normalize(s.replace(/\/+$/, "")) ?? "")
-      : [""];
+    // The whole vault is the root ""; a folder naming the vault itself or leaving it allows nothing (#419)
+    const limits = Scope.of(scope);
+    const roots = limits.restricted ? limits.roots() : [""];
     const files = await vault.files();
-    const results: string[] = [];
+    // Every match is found before the order is decided: the best ones first, or the newest (#416)
+    const found: { path: string; line: string; score: number; order: number }[] = [];
     for (const root of roots) {
       if (root && !(await vault.isFolder(root))) continue;
       const below = files.filter((file) => file.endsWith(".md") && (!root || file.startsWith(`${root}/`)))
@@ -83,15 +140,28 @@ export function makeSearchTools(vault: VaultPort, scope: string[] | null = null)
           continue;
         }
         if (wantedTag && !noteTags(content).has(wantedTag)) continue;
-        if (!queryLower || content.toLowerCase().includes(queryLower)) {
-          const idx = queryLower ? Math.max(content.toLowerCase().indexOf(queryLower), 0) : 0;
-          const start = Math.max(0, idx - 40);
-          const end = Math.min(content.length, idx + query.length + 40);
-          results.push(`${rel}: ${content.slice(start, end).replace(/\n/g, " ").trim()}`);
-          if (results.length >= limit) break;
-        }
+        const lower = content.toLowerCase();
+        // Every word, in any order (#416)
+        if (!terms.every((term) => lower.includes(term))) continue;
+        if (found.some((item) => item.path === rel)) continue;
+        // Its matching lines with their numbers; with only a tag or folder, its first line
+        const hits = terms.length ? hitLines(content, terms) : [];
+        const shown = hits.length ? hits.map((hit) => `line ${hit.line}: ${hit.text}`).join(" | ")
+          : content.slice(0, 80).replace(/\n/g, " ").trim();
+        found.push({ path: rel, line: `${rel}: ${shown}`, score: relevance(rel, content, query, terms),
+                     order: found.length });
       }
-      if (results.length >= limit) break;
+    }
+    if (byModified && vault.modified) {
+      const times = new Map(await Promise.all(found.map(async (item) =>
+        [item.path, await vault.modified!(item.path).catch(() => 0)] as const)));
+      found.sort((a, b) => (times.get(b.path) ?? 0) - (times.get(a.path) ?? 0) || a.order - b.order);
+    } else if (terms.length) {
+      found.sort((a, b) => b.score - a.score || a.order - b.order);
+    }
+    const results = found.slice(0, limit).map((item) => item.line);
+    if (found.length > limit) {
+      results.push(`[${found.length - limit} more notes match: add a word, a tag or a folder to narrow it]`);
     }
     // Said in words: an empty answer reads to a small model as a broken tool (#160). A restricted agent's also says
     // where it looked (paths.scopeHint)

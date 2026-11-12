@@ -1,6 +1,5 @@
 /**
- * Runs chat turns inside the plugin, with the TypeScript agent core — behind the experimental switch until the
- * cut-over (#88).
+ * Runs chat turns inside the plugin, with the TypeScript agent core.
  *
  * It answers the chat view the way the runtime's socket client did until the cut-over (#88): turns (send, cancel, confirm), conversations kept as session
  * notes (#85: list, open, delete, keep or stop keeping, compaction), and the turns it can take back (diff, undo).
@@ -11,22 +10,24 @@
 import { FileSystemAdapter, Notice, type App } from "obsidian";
 
 import type { ReadyInfo, TurnChanges, TurnHandlers, TurnSummary, UndoResult } from "../api/types";
-import type { AgentCatalog } from "../config/agents";
+import type { AgentCatalog, AgentDefinition } from "../config/agents";
 import type { PluginBackend } from "../config/backend";
-import { detectConnection, type ServerCache, hasConnection, NO_CONNECTION, profileSummaries, resolveConnection, writtenOutKey }
-  from "../config/connections";
+import { answersAtOnce, type Connection, detectConnection, type ServerCache, hasConnection, NO_CONNECTION, profileSummaries, resolveConnection,
+         writtenOutKey } from "../config/connections";
 import { connectionApproval, type DeviceApprovals } from "../config/deviceApprovals";
-import { featurePrompt } from "../config/features";
+import { featurePrompt, withMemoryTools } from "../config/features";
 import { runTurn, turnFailure, type Confirm } from "../core/agentLoop";
 import { compactHistory, dueForCompaction, estimateMessages, KEEP_SHARE, recentThatFit, retryAfterCompaction,
          splitHistory, summariseLimit } from "../core/compaction";
-import { serially } from "../core/serial";
-import { Journal, type Turn } from "../core/journal";
+import { AnswerQueue } from "../core/answerQueue";
+import { messageOf } from "../core/errors";
+import { type Change, Journal, type SavedJournal, type Turn } from "../core/journal";
+import { keepTrail, sentHistory } from "../core/keptResults";
 import { undoTurns, withoutLast, type RewindResult } from "../core/rewind";
-import { OpenAiChat, type ChatModel, type LlmSettings } from "../core/llm/openaiChat";
+import { OpenAiChat, type ChatMessage, type ChatModel, type LlmSettings } from "../core/llm/openaiChat";
 import { OpenAiResponses } from "../core/llm/openaiResponses";
 import { scopePrompt, toolConventions } from "../core/paths";
-import { promptContext, renderPrompt } from "../core/prompt";
+import { promptContext, renderPrompt, untrustedPrompt } from "../core/prompt";
 import {
   type CallsByAnswer, compactSession, type ConnectionChange, deleteSession, listSessions, loadSessionWithCalls, sanitiseName,
   savedCall, type SavedCall, saveSession, setSessionTitle, type SessionMessage, sessionMeta, type SessionSummary,
@@ -36,7 +37,7 @@ import type { Tool } from "../core/tools/tool";
 import { assembleTools, mcpPrompt, wantsMcp } from "../mcp/agentTools";
 import type { McpManager } from "../mcp/manager";
 import { mcpServers } from "../mcp/servers";
-import { obsidianVault, setRecorder } from "../vault/obsidianVault";
+import { obsidianVault } from "../vault/obsidianVault";
 import { obsidianToolset, type ToolsetOptions } from "../vault/toolset";
 
 /** The Python runtime's default for an agent that sets no max_iterations (registry/agent_loader.py). */
@@ -91,6 +92,19 @@ interface Conversation {
   title?: string;
   /** Each answer's tool calls, saved with the note when the setting is on (#282). */
   calls: CallsByAnswer;
+  /**
+   * Each answer's tool calls and results, by the answer, sent again with the next messages while the setting is on
+   * (#332). Never saved: a reopened conversation, or one summarised, starts without them.
+   */
+  trails: Map<SessionMessage, ChatMessage[]>;
+  /** The hosts web_fetch was allowed to open pages on in this conversation (#403); never saved. */
+  webHosts: Set<string>;
+}
+
+/** An answer's turn in the undo journal (#206): the journal it was opened in, and its id while it is open. */
+interface OpenTurn {
+  journal?: Journal;
+  turn?: string;
 }
 
 /** An agent's unsaved edits in the Agents tab, previewed before they are saved (#67). */
@@ -129,6 +143,8 @@ export interface InProcessSource {
   deviceApprovals: DeviceApprovals;
   /** A line for the plugin's log (the "Show the agent's log" command); the plugin writes nothing to the console. */
   log(line: string): void;
+  /** Where the undo journal is kept on this device across restarts (#410); without it, it lives in memory only. */
+  journalStore?: { load(): Promise<unknown>; save(data: SavedJournal): Promise<void> };
 }
 
 /** Append what the user is looking at, so "summarise this" has something to refer to — `_with_context` (ws.py). */
@@ -142,17 +158,29 @@ export function withContext(message: string, context: Record<string, unknown> = 
 export class InProcessAgent {
   private readonly running = new Map<string, AbortController>();
   /**
-   * Turns run one at a time (#177): they share one undo journal, and a turn from the terminal starting beside the
-   * chat's would close the chat's journal entry early and take its later changes as its own. A later turn waits.
+   * Answers in different chats run side by side as far as their server takes them (#206); each has its own turn in
+   * the undo journal, which its tools' writes go to. Within a conversation they stay in order, and rewinding runs
+   * alone.
    */
-  private readonly oneAtATime = serially();
+  private readonly queue = new AnswerQueue();
   /** Open conversations by session name; "" is the one that is not kept. */
   private readonly conversations = new Map<string, Conversation>();
   /** Titles given to conversations not started yet, by name (#286). */
   private readonly pendingTitles = new Map<string, string>();
   /** Confirmations waiting for the user, by call id, with the turn they belong to. */
-  private readonly pending = new Map<string, { turn: string; answer: (approved: boolean) => void }>();
+  private readonly pending = new Map<string, { turn: string; name: string; answer: (approved: boolean) => void }>();
+  /** The tools each running answer may call without asking again, after "Allow for this answer" (#405). */
+  private readonly allowedRest = new Map<string, Set<string>>();
   private journal: Journal | null = null;
+  /** Whether the turns saved before a restart were read into the journal (#410): once per run. */
+  private journalRestored = false;
+  /** Saves of the journal, one after another, so an older one never lands after a newer. */
+  private journalSaving: Promise<void> = Promise.resolve();
+  /**
+   * The tokens each running answer's model calls were sent and gave back, as their servers counted them (#414), by
+   * turn: kept here rather than in answer(), so a stopped answer still reports what it spent.
+   */
+  private readonly spent = new Map<string, { input: number; output: number }>();
 
   /** What llama.cpp servers said about themselves, by server — asked once per run (resolve_llm_config). */
   private readonly detected: ServerCache = new Map();
@@ -176,19 +204,27 @@ export class InProcessAgent {
     const id = crypto.randomUUID();
     const controller = new AbortController();
     this.running.set(id, controller);
-    void this.oneAtATime(async () => {
-      // Stopped while it waited: it never starts
-      controller.signal.throwIfAborted();
-      await this.run(id, prompt, options, handlers, controller.signal);
-    })
+    // This answer's turn in the undo journal, once it has one
+    const opened: OpenTurn = {};
+    void this.run(id, prompt, options, handlers, controller.signal, opened)
       .catch((error: unknown) => {
         // A turn stopped halfway is exactly the one you want back: close it in the journal and say what it changed
-        const changed = this.closeTurn();
-        if (controller.signal.aborted) handlers.onDone("", true, {}, changed, 0);
+        const changed = this.closeTurn(opened);
+        if (controller.signal.aborted) handlers.onDone("", true, this.spentUsage(id), changed, 0);
         else handlers.onError(turnFailure(error), true);
       })
-      .finally(() => this.running.delete(id));
+      .finally(() => {
+        this.running.delete(id);
+        this.spent.delete(id);
+        this.allowedRest.delete(id);
+      });
     return id;
+  }
+
+  /** What *turn* spent, as an answer's usage says it: input_tokens and output_tokens, or nothing when not counted. */
+  private spentUsage(turn: string): Record<string, number> {
+    const spent = this.spent.get(turn);
+    return spent ? { input_tokens: spent.input, output_tokens: spent.output } : {};
   }
 
   cancel(id: string): void {
@@ -197,18 +233,34 @@ export class InProcessAgent {
     for (const [callId, waiting] of this.pending) if (waiting.turn === id) this.confirm(id, callId, false);
   }
 
-  /** The user's answer to a confirmation, from the chat view's dialog. */
-  confirm(_turn: string, callId: string, approved: boolean): void {
+  /**
+   * The user's answer to a confirmation, from the chat view's dialog. *rest*: "Allow for this answer" — the answer's
+   * further calls of the same tool run without asking (#405); the next answer asks again.
+   */
+  confirm(_turn: string, callId: string, approved: boolean, rest = false): void {
     const waiting = this.pending.get(callId);
     this.pending.delete(callId);
+    if (waiting && approved && rest) {
+      const allowed = this.allowedRest.get(waiting.turn) ?? new Set<string>();
+      allowed.add(waiting.name);
+      this.allowedRest.set(waiting.turn, allowed);
+    }
     waiting?.answer(approved);
   }
 
   /** Asks through the chat view's dialog, and waits; no answer in time, or a cancelled turn, is a refusal. */
   private asker(turn: string, handlers: TurnHandlers): Confirm {
     return (callId, name, input) => new Promise<boolean>((resolve) => {
+      // Allowed for the rest of this answer (#405) — but never a write that would load or run something once shown
+      // (#395): that one is about what leaves the machine, and is asked about each time
+      // Nor a web page: asked per host (#403)
+      const risky = typeof (input as { when_shown?: unknown } | null)?.when_shown === "string" || name === "web_fetch";
+      if (!risky && this.allowedRest.get(turn)?.has(name)) {
+        resolve(true);
+        return;
+      }
       const timer = window.setTimeout(() => this.confirm(turn, callId, false), CONFIRM_TIMEOUT_MS);
-      this.pending.set(callId, { turn, answer: (approved) => {
+      this.pending.set(callId, { turn, name, answer: (approved) => {
         window.clearTimeout(timer);
         resolve(approved);
       } });
@@ -216,10 +268,14 @@ export class InProcessAgent {
     });
   }
 
-  /** Close the journal's open turn; what it changed, for the chat view's footer and its undo. */
-  private closeTurn(): TurnChanges | null {
-    const turn = this.journal?.finish();
-    return turn ? { turn: turn.id, files: this.journal!.paths(turn) } : null;
+  /** Close an answer's turn in the journal; what it changed, for the chat view's footer and its undo. */
+  private closeTurn(opened: OpenTurn): TurnChanges | null {
+    const { journal, turn: id } = opened;
+    opened.turn = undefined;
+    if (!journal || id === undefined) return null;
+    const turn = journal.finish(id);
+    if (turn) this.saveJournal();
+    return turn ? { turn: turn.id, files: journal.paths(turn) } : null;
   }
 
   /**
@@ -235,7 +291,7 @@ export class InProcessAgent {
     const rendered = renderPrompt(agent.prompt, promptContext(vaultPath, agent.name, model));
     // A restricted agent is told it is, so a note outside its folders is "out of reach", not "does not exist"
     let text = rendered.text + toolConventions(tools.map((tool) => tool.name)) + scopePrompt(agent.vaultScope)
-      + mcpPrompt(tools) + featurePrompt(agent.tools, values);
+      + mcpPrompt(tools) + featurePrompt(agent.tools, values) + untrustedPrompt(rendered.text, tools.length);
     // What the agent knows about the user, when memory is on and meant for the prompt (runner.py)
     if (settings.memory?.inject) {
       const profileText = await readUserProfile(this.vault, settings.memory.profilePath, settings.memory.maxProfileTokens);
@@ -276,13 +332,14 @@ export class InProcessAgent {
     const ported = obsidianToolset(this.app, scoped ? agent.vaultScope : null, settings);
     const mcpFromCache = wantsMcp(agent.tools, scoped);
     const mcpTools = mcpFromCache ? this.source.mcp.knownTools(mcpServers(values)) : [];
-    const tools = assembleTools(agent.tools, ported, mcpTools, scoped);
+    // With Memory on, the built-in assistant keeps the profile too (#401)
+    const tools = assembleTools(withMemoryTools(agent, values), ported, mcpTools, scoped);
     const { text, unsupported } = await this.systemPrompt(agent, model, values, settings, tools);
     return { text, unsupported, model, mcpFromCache };
   }
 
   private async run(turn: string, prompt: string, options: TurnOptions, handlers: TurnHandlers,
-                    signal: AbortSignal): Promise<void> {
+                    signal: AbortSignal, opened: OpenTurn): Promise<void> {
     const catalog = this.source.catalog;
     const agent = await catalog.get(options.agent || await catalog.defaultName());
     if (!agent) throw new Error(`no agent called '${options.agent}'`);
@@ -314,13 +371,41 @@ export class InProcessAgent {
       throw new Error(`the connection '${connection.name || "llm"}' names no model, and its server lists none. Set `
                       + "one under Settings → Hiro Agent → Connections.");
     }
+    const key = options.session || scratchKey(options.view);
+    // Beside the other chats' answers as far as the server takes them; after this conversation's earlier ones (#206)
+    let waited = false;
+    await this.queue.answer({ server: connection.baseUrl, limit: answersAtOnce(connection), conversation: key }, () => {
+      if (waited) handlers.onWaiting?.(false);
+      return this.answer(turn, prompt, options, handlers, signal, opened, { agent, values, connection, key });
+    }, () => {
+      waited = true;
+      handlers.onWaiting?.(true);
+    }, signal);
+  }
+
+  /** The answer, once it is its turn to run (#206). */
+  private async answer(turn: string, prompt: string, options: TurnOptions, handlers: TurnHandlers, signal: AbortSignal,
+                       opened: OpenTurn, resolved: { agent: AgentDefinition; values: Record<string, unknown>;
+                                                     connection: Connection; key: string }): Promise<void> {
+    // Stopped while it waited: it never starts
+    signal.throwIfAborted();
+    const { agent, values, connection, key } = resolved;
     const model = connection.model;
     const profileName = connection.name;
     const settings = await this.options();
-    this.installJournal(settings);
+    // Its own turn in the journal, which its tools' writes go to, and no other answer's (#206)
+    const journal = await this.installJournal(settings);
+    opened.journal = journal ?? undefined;
+    opened.turn = journal?.begin(prompt);
+    const record = journal && opened.turn !== undefined
+      ? ((id: string) => (change: Change) => journal.record(change, id))(opened.turn) : undefined;
 
     const scoped = agent.vaultScope.length > 0;
-    const ported = obsidianToolset(this.app, scoped ? agent.vaultScope : null, settings);
+    const window = connection.contextWindow;
+    const conversation = await this.conversation(key, window, options.keep !== false);
+    // The hosts this conversation may open pages on without asking again (#403)
+    const ported = obsidianToolset(this.app, scoped ? agent.vaultScope : null,
+                                   { ...settings, webHosts: conversation.webHosts }, record);
     // MCP servers are asked only for an agent that lists their tools; one that fails is said, and left out
     let mcpTools: Tool[] = [];
     if (wantsMcp(agent.tools, scoped)) {
@@ -329,12 +414,10 @@ export class InProcessAgent {
       for (const failure of failures) new Notice(`Hiro Agent: an MCP server is left out of this answer — ${failure}`, 10_000);
     }
     // Exactly the tools the agent lists, in its order — none when it lists none (assemble_tools, runner.py)
-    const tools = assembleTools(agent.tools, ported, mcpTools, scoped);
+    // With Memory on, the built-in assistant keeps the profile too (#401)
+    const tools = assembleTools(withMemoryTools(agent, values), ported, mcpTools, scoped);
     const { text: systemPrompt } = await this.systemPrompt(agent, model, values, settings, tools);
 
-    const key = options.session || scratchKey(options.view);
-    const window = connection.contextWindow;
-    const conversation = await this.conversation(key, window, options.keep !== false);
     const llmSettings: LlmSettings = {
       baseUrl: connection.baseUrl, model, apiKey: connection.apiKey, temperature: connection.temperature,
       topP: connection.topP, topK: connection.topK, minP: connection.minP, presencePenalty: connection.presencePenalty,
@@ -347,7 +430,9 @@ export class InProcessAgent {
     // Summarised by size in the window (#154): before the request when the history no longer fits well — another,
     // smaller model chosen, say — and after the answer when the conversation has grown past the share
     let compacted = 0;
-    const estimate = (): number => estimateMessages([{ content: systemPrompt }, ...conversation.loaded]);
+    // With the kept tool results counted: they are sent, so they decide when the conversation is summarised (#332)
+    const keepResults = settings.keepToolResults;
+    const estimate = (): number => estimateMessages([{ content: systemPrompt }, ...sentHistory(conversation, keepResults)]);
     // Each summary is told to the chat, which marks the place with a divider and shows the text on demand
     const summarise = async (when: "before" | "after"): Promise<number> => {
       const exchanges = await this.compact(conversation, llm, window);
@@ -356,7 +441,6 @@ export class InProcessAgent {
       return exchanges;
     };
     if (dueForCompaction(estimate(), window)) compacted += await summarise("before");
-    this.journal?.begin(prompt);
     let toolCalls = 0;
     let peak = 0;
     // This answer's calls, for its conversation's note when the setting is on (#282)
@@ -364,7 +448,7 @@ export class InProcessAgent {
     const inputs = new Map<string, { name: string; input: unknown }>();
     const attempt = (): ReturnType<typeof runTurn> => runTurn({
       model: llm, tools, systemPrompt, prompt: withContext(prompt, options.context),
-      history: conversation.loaded,
+      history: sentHistory(conversation, keepResults),
       maxIterations: agent.maxIterations || DEFAULT_MAX_ITERATIONS,
       thinking: connection.enableThinking, signal, confirm: this.asker(turn, handlers),
       maxToolResultChars: Math.floor(window * TOOL_RESULT_SHARE * CHARS_PER_TOKEN),
@@ -378,6 +462,10 @@ export class InProcessAgent {
         },
         onSetAside: (total) => handlers.onSetAside?.(total),
         onServiceTier: (tier) => handlers.onServiceTier?.(tier),
+        onSpent: (input, output) => {
+          const spent = this.spent.get(turn) ?? { input: 0, output: 0 };
+          this.spent.set(turn, { input: spent.input + input, output: spent.output + output });
+        },
         onToken: handlers.onToken,
         onThinking: handlers.onThinking,
         onToolCall: (callId, name, input) => {
@@ -397,8 +485,11 @@ export class InProcessAgent {
     const result = retried.result;
     compacted += retried.compacted;
     // Closed before the conversation is saved: the session note is not one of the turn's changes
-    const changed = this.closeTurn();
-    conversation.loaded = result.history as SessionMessage[];
+    const changed = this.closeTurn(opened);
+    // The question and the answer, added to the conversation as it now stands (summarised before the request, maybe);
+    // the history sent had the kept tool results in it, which the conversation keeps beside its answers instead
+    conversation.loaded = [...conversation.loaded, ...(result.history.slice(-2) as SessionMessage[])];
+    if (keepResults) keepTrail(conversation, conversation.loaded[conversation.loaded.length - 1], result.trail, result.results);
     const answer = conversation.loaded[conversation.loaded.length - 1];
     if (settings.saveToolCalls && calls.size && answer?.role === "assistant") conversation.calls.set(answer, [...calls.values()]);
     conversation.last = { agent: agent.name, model, connection: profileName };
@@ -412,19 +503,48 @@ export class InProcessAgent {
     // What the next message carries, after any summary: the measure the summary goes by, so the meter and it agree
     handlers.onContext?.(estimate(), window, true, peak);
     const seconds = Math.round((Date.now() - started) / 100) / 10;
-    handlers.onDone(result.reply, false, { tool_calls: result.toolCalls, seconds }, changed, compacted);
+    handlers.onDone(result.reply, false, { tool_calls: result.toolCalls, seconds, ...this.spentUsage(turn) }, changed,
+                    compacted);
   }
 
-  /** Journal the vault's writes from now on, as the runtime's journal settings say (AgentSession.__aenter__). */
-  private installJournal(settings: ToolsetOptions): void {
+  /**
+   * The journal an answer's writes go to, as the journal settings say (AgentSession.__aenter__); null when off. A new
+   * one takes the turns saved before a restart, once (#410).
+   */
+  private async installJournal(settings: ToolsetOptions): Promise<Journal | null> {
     if (!settings.journal.enabled) {
       this.journal = null;
-      setRecorder(null);
-      return;
+      return null;
     }
-    if (!this.journal) this.journal = new Journal(settings.journal.turns, settings.journal.maxBytes);
+    if (!this.journal) {
+      const journal = new Journal(settings.journal.turns, settings.journal.maxBytes);
+      this.journal = journal;
+      if (!this.journalRestored && this.source.journalStore) {
+        this.journalRestored = true;
+        try {
+          journal.restore(await this.source.journalStore.load());
+        } catch (error) {
+          this.source.log(`undo: the saved journal could not be read (${messageOf(error)}); starting a new one`);
+        }
+      }
+    }
+    return this.journal;
+  }
+
+  /** The journal for undo from the chat or the terminal, with the saved turns, even before any answer (#410). */
+  private async journalNow(): Promise<Journal | null> {
+    if (this.journal) return this.journal;
+    return this.installJournal(await this.options());
+  }
+
+  /** Save the kept turns on this device (#410); a failure is logged, and undo goes on in memory. */
+  private saveJournal(): void {
     const journal = this.journal;
-    setRecorder((change) => journal.record(change));
+    const store = this.source.journalStore;
+    if (!journal || !store) return;
+    this.journalSaving = this.journalSaving.then(() => store.save(journal.saved())).catch((error: unknown) => {
+      this.source.log(`undo: the journal could not be saved (${messageOf(error)})`);
+    });
   }
 
   // -- conversations -------------------------------------------------------------------------------------------
@@ -439,7 +559,7 @@ export class InProcessAgent {
     // A view's own unkept conversation (scratchKey) is never named, so never written
     const named = keep && key && !key.startsWith("\u0000");
     const conversation: Conversation = { name: named ? key : null, loaded: [], unloaded: [], connections: [],
-                                         pendingCompact: false, calls: new Map(),
+                                         pendingCompact: false, calls: new Map(), trails: new Map(), webHosts: new Set(),
                                          title: this.pendingTitles.get(key) };
     this.pendingTitles.delete(key);
     if (conversation.name) await this.load(conversation, contextWindow);
@@ -455,6 +575,7 @@ export class InProcessAgent {
     const loaded = recent.messages;
     const kept = loaded.filter((m) => m.role !== "system").length;
     conversation.loaded = loaded;
+    conversation.trails.clear();
     conversation.unloaded = full.slice(0, full.length - kept);
     // The saved calls stay with their answers, whichever list holds them; they are never part of the history sent
     conversation.calls = new Map([...all.calls, ...recent.calls]);
@@ -580,8 +701,9 @@ export class InProcessAgent {
   // -- the journal ---------------------------------------------------------------------------------------------
 
   async turns(): Promise<{ journalling: boolean; turns: TurnSummary[] }> {
-    if (!this.journal) return { journalling: false, turns: [] };
-    return { journalling: true, turns: this.journal.turns().reverse().map((turn) => this.summary(turn)) };
+    const journal = await this.journalNow();
+    if (!journal) return { journalling: false, turns: [] };
+    return { journalling: true, turns: journal.turns().reverse().map((turn) => this.summary(turn)) };
   }
 
   private summary(turn: Turn): TurnSummary {
@@ -589,14 +711,14 @@ export class InProcessAgent {
              undone: turn.undone };
   }
 
-  private found(id: string): Turn {
-    const turn = this.journal?.find(id);
+  private async found(id: string): Promise<Turn> {
+    const turn = (await this.journalNow())?.find(id);
     if (!turn) throw new Error("what that answer changed is no longer kept for undo");
     return turn;
   }
 
   async turnDiff(id: string): Promise<{ files: string[]; diff: string; undone: boolean; stale: string[] }> {
-    const turn = this.found(id);
+    const turn = await this.found(id);
     const stale: string[] = [];
     // Which files undo would refuse, asked before the user decides rather than reported after
     for (const change of turn.changes) {
@@ -610,12 +732,13 @@ export class InProcessAgent {
   /**
    * Go back to before an earlier message (#303): what the answers *turns* changed is taken back, newest first, then
    * the conversation loses its last *exchanges* questions and answers — in its note when it is kept, in memory when
-   * not. In the queue of answers, so it never runs beside one.
+   * not. Alone: once the answers running have finished, and before any asked for after it (#206).
    */
   async rewind(target: { session?: string; view?: string }, exchanges: number,
                turns: string[]): Promise<RewindResult & { removed: number }> {
-    return this.oneAtATime(async () => {
-      const result = await undoTurns(this.journal, this.vault, turns);
+    return this.queue.exclusive(async () => {
+      const result = await undoTurns(await this.journalNow(), this.vault, turns);
+      this.saveJournal();
       const name = target.session;
       if (!name) {
         const conversation = this.conversations.get(scratchKey(target.view));
@@ -642,11 +765,12 @@ export class InProcessAgent {
   }
 
   async undoTurn(id: string): Promise<UndoResult> {
-    const turn = this.found(id);
+    const turn = await this.found(id);
     if (turn.undone) {
       return { ok: false, undone: true, restored: [], refused: [{ path: "", reason: "what this answer changed is already undone" }] };
     }
     const result = await this.journal!.undo(turn, this.vault);
+    this.saveJournal();
     return { ok: result.restored.length > 0 && !result.refused.length, undone: turn.undone, restored: result.restored,
              refused: result.refused };
   }

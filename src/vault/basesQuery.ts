@@ -45,6 +45,30 @@ export interface QueryRows {
   rows: string[][];
   /** The group of each row, when the view groups them; empty otherwise. */
   groups: string[];
+  /** The property each column shows ("file", "status", "note.projects"), for count_by (#267). */
+  ids: string[];
+  /** Each row's cells as their values: none for an empty one, a list property's items each on their own. */
+  cells: string[][][];
+}
+
+/** A Value as text; an empty property is a null Value, which prints as "null". */
+function textOf(value: { toString(): string } | null): string {
+  const text = value === null ? "" : value.toString();
+  return text === "null" ? "" : text;
+}
+
+/** A cell's values: a list's items (a ListValue, told by its length and get), or the one value, or none. */
+function itemsOf(value: unknown): string[] {
+  const list = value as { length?: unknown; get?: unknown } | null;
+  if (list && typeof list.length === "function" && typeof list.get === "function") {
+    const items: string[] = [];
+    for (let i = 0; i < (list.length as () => number)(); i++) {
+      items.push(textOf((list.get as (i: number) => { toString(): string } | null)(i)));
+    }
+    return items.filter(Boolean);
+  }
+  const text = textOf(value as { toString(): string } | null);
+  return text ? [text] : [];
 }
 
 function rowsOf(view: QueryView): QueryRows {
@@ -54,19 +78,17 @@ function rowsOf(view: QueryView): QueryRows {
   const shown = properties.filter((p) => p !== "file.name");
   const grouped = result.groupedData.some((group) => group.hasKey());
   const rows: string[][] = [];
+  const cells: string[][][] = [];
   const groups: string[] = [];
   for (const group of result.groupedData) {
     for (const entry of group.entries) {
-      rows.push([entry.file.path, ...shown.map((p) => {
-        const value = entry.getValue(p);
-        // An empty property is a null Value, which prints as "null"
-        const text = value === null ? "" : value.toString();
-        return text === "null" ? "" : text;
-      })]);
+      const values = shown.map((p) => entry.getValue(p));
+      rows.push([entry.file.path, ...values.map(textOf)]);
+      cells.push([[entry.file.path], ...values.map(itemsOf)]);
       if (grouped) groups.push(group.key?.toString() ?? "");
     }
   }
-  return { columns, rows, groups: grouped ? groups : [] };
+  return { columns, rows, groups: grouped ? groups : [], ids: ["file", ...shown.map(String)], cells };
 }
 
 /**

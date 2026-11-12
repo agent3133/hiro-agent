@@ -11,13 +11,21 @@ import type { App, CliData, Plugin } from "obsidian";
 import { asksFirst, confirmArgs, toolErrorText } from "../core/agentLoop";
 import { obsidianToolset, type ToolsetOptions } from "./toolset";
 
-export function registerToolCli(plugin: Plugin, app: App, options: () => Promise<ToolsetOptions>): void {
+/** What `agent:tool` answers while *Developer* is off on this device. */
+export const DEVELOPER_OFF = "Error: agent:tool needs Settings → Hiro Agent → Advanced → Developer, which is off on this device";
+
+/**
+ * Registered always and checked on every call (#397): registered only while Developer was on at load, it kept
+ * working after the switch went off, until the plugin reloaded.
+ */
+export function registerToolCli(plugin: Plugin, app: App, options: () => Promise<ToolsetOptions>,
+                                developer: () => boolean): void {
   plugin.registerCliHandler("agent:tool", "Run one of the agent's tools (developer setting)", {
     name: { value: "<tool>", description: "The tool, e.g. get_backlinks", required: true },
     args: { value: "<json>", description: "Its arguments as a JSON object, e.g. {\"path\":\"Note.md\"}" },
     scope: { value: "<folders>", description: "Comma-separated folders, as an agent's vault_scope" },
     confirm: { description: "Allow a destructive tool to run (stands in for the user's answer)" },
-  }, (params: CliData) => runTool(app, params, options));
+  }, (params: CliData) => (developer() ? runTool(app, params, options) : Promise.resolve(DEVELOPER_OFF)));
 }
 
 async function runTool(app: App, params: CliData, options: () => Promise<ToolsetOptions>): Promise<string> {

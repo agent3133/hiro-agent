@@ -9,7 +9,8 @@
 
 import {
   type ChatMessage, type ChatModel, type ChatRequest, type Completion, type ContentPart, type Deltas, type LlmSettings,
-  type StreamParser, type ToolCallRequest, flexFallback, postStream, serverError,
+  type StreamParser, type ToolCallRequest, flexFallback, postStream, refusedSetting, serverError,
+  withoutDropped,
 } from "./openaiChat";
 
 /**
@@ -212,15 +213,23 @@ export class OpenAiResponses implements ChatModel {
   /** Off once the API refused it: a reasoning summary (an organisation not verified for one), encrypted items. */
   private summary = true;
   private encrypted = true;
+  /** Sampling settings the model refused (reasoning models take no temperature): not sent from then on. */
+  private readonly dropped = new Set<string>();
 
   constructor(private readonly settings: LlmSettings) {}
 
   complete(request: ChatRequest, deltas: Deltas, signal?: AbortSignal): Promise<Completion> {
     const asked = { summary: this.summary, encrypted: this.encrypted };
-    const body = responsesBody(this.settings, request, asked);
+    const body = withoutDropped(responsesBody(this.settings, request, asked), this.dropped);
     const host = new URL(this.settings.baseUrl).host;
     const fallback = (fallback: LlmSettings): Promise<Completion> => new OpenAiResponses(fallback).complete(request, deltas, signal);
     const answer = postStream(this.settings, "responses", body, new ResponsesBuilder(deltas), signal, (status, text) => {
+      const key = refusedSetting(status, text, body);
+      if (key) {
+        this.dropped.add(key);
+        this.settings.log?.(`${host} does not take ${key} for this model; sent again without it.`);
+        return this.complete(request, deltas, signal);
+      }
       // What this model or account does not offer is asked for no more, and the request sent again without it
       if (status === 400 && asked.summary && /summary/i.test(text)) {
         this.summary = false;

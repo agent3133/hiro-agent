@@ -171,6 +171,11 @@ export interface TurnHandlers {
   onToolResult(callId: string, result: string, isError: boolean): void;
   onConfirmRequest(callId: string, name: string, input: unknown): void;
   /**
+   * The answer waits for another chat's answer to finish, as its server answers no more at once (#206): true when
+   * it starts waiting, false when it starts. Not called for an answer that never waited.
+   */
+  onWaiting?(waiting: boolean): void;
+  /**
    * The conversation was just summarised (#154): *exchanges* went into *summary*, *before* this answer was asked
    * for (the history no longer fitted) or after it.
    */

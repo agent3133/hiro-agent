@@ -11,6 +11,8 @@
  *   once approved on this device, for exactly this command line (`fingerprint`).
  */
 
+import { isLoopbackUrl } from "../core/loopback";
+
 export type Transport = "stdio" | "http";
 
 export interface McpServerSpec {
@@ -24,6 +26,18 @@ export interface McpServerSpec {
   enabled: boolean;
   /** Tool names as the server gives them, or "*" for all of them. */
   toolsFilter: string[];
+  /** Per tool, as the server names it: whether its calls ask first (#403); unnamed ones follow askFirst(). */
+  askFirst: Record<string, boolean>;
+}
+
+/**
+ * Whether a call of the server's *tool* asks first (#403): as the user set it; else always for an http server, whose
+ * calls send their arguments off the machine, read-only or not; else as the server's hints say (*hinted*).
+ */
+export function asksFirst(spec: Pick<McpServerSpec, "transport" | "askFirst">, tool: string, hinted: boolean): boolean {
+  const set = spec.askFirst[tool];
+  if (typeof set === "boolean") return set;
+  return spec.transport === "http" ? true : hinted;
 }
 
 /** The separator between a server's name and its tool's: `filesystem__read_file` (prefix_mcp_tools). */
@@ -62,6 +76,9 @@ export function mcpServers(values: Record<string, unknown>): McpServerSpec[] {
       headers: record(server.headers),
       enabled: server.enabled !== false,
       toolsFilter: filter.length ? filter : ["*"],
+      askFirst: Object.fromEntries(Object.entries(
+        server.ask_first && typeof server.ask_first === "object" && !Array.isArray(server.ask_first) ? server.ask_first : {},
+      ).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean")),
     }];
   });
 }
@@ -98,11 +115,14 @@ export function fingerprint(spec: McpServerSpec): string {
 
 /**
  * Whether *spec* may be used only once approved on this device: a stdio server starts a program here; an http
- * server whose URL or headers name a `${KEY}` sends a keychain secret to wherever the synced settings say (#136).
+ * server whose URL or headers name a `${KEY}` sends a keychain secret to wherever the synced settings say (#136);
+ * and an http server on another computer gets what its tools are called with, so synced settings pointing it
+ * somewhere new must not send notes there unasked (#407). One on this computer without a key needs none.
  */
 export function needsApproval(spec: McpServerSpec): boolean {
   if (spec.transport === "stdio") return true;
-  return [spec.url, ...Object.values(spec.headers)].some((text) => /\$\{[^}]+\}/.test(text));
+  if ([spec.url, ...Object.values(spec.headers)].some((text) => /\$\{[^}]+\}/.test(text))) return true;
+  return !isLoopbackUrl(spec.url);
 }
 
 /** What an http server that needs approval sends, as the user is shown it: the URL and the headers as written. */

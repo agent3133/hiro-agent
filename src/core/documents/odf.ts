@@ -117,7 +117,9 @@ function odsToMarkdown(content: Document, pages: string): string {
       const cells: string[] = [];
       for (const cell of children(row).filter((c) => c.localName === "table-cell" || c.localName === "covered-table-cell")) {
         const text = value(cell);
-        const repeat = Math.min(Number(attr(cell, "number-columns-repeated") || "1"), text ? MAX_REPEAT : 1);
+        // Empty cells keep their count too, or the cells after them move left (#381); a sheet's empty rest is
+        // dropped below with the other trailing empty cells
+        const repeat = Math.min(Number(attr(cell, "number-columns-repeated") || "1"), MAX_REPEAT);
         for (let i = 0; i < repeat; i++) cells.push(text);
       }
       while (cells.length && !cells[cells.length - 1].trim()) cells.pop();
@@ -137,6 +139,10 @@ function odsToMarkdown(content: Document, pages: string): string {
   return out.join("\n\n");
 }
 
+/** The drawing shapes that can hold text on a slide (ODF 1.3 §10.3); `draw:g` groups them. */
+const SHAPES = new Set(["frame", "custom-shape", "rect", "ellipse", "circle", "polygon", "regular-polygon", "polyline",
+                        "path", "line", "connector", "caption", "measure"]);
+
 function odpToMarkdown(content: Document, pages: string): string {
   const slides = descendants(content, "page").filter((p) => p.parentElement?.localName === "presentation");
   if (!slides.length) return "The presentation has no slides.";
@@ -154,17 +160,35 @@ function odpToMarkdown(content: Document, pages: string): string {
         }
       }
     };
-    for (const box of descendants(frame, "text-box")) visit(box, 0);
+    // A frame keeps its text in a text box; a drawn shape (a rectangle, an arrow) holds its paragraphs itself
+    if (frame.localName === "frame") for (const box of descendants(frame, "text-box")) visit(box, 0);
+    else visit(frame, 0);
     return out;
+  };
+  /** The shapes of *container* in order, those inside groups too (#384). */
+  const shapes = (container: Element): Element[] => children(container).flatMap((shape) =>
+    shape.localName === "g" ? shapes(shape) : SHAPES.has(shape.localName) ? [shape] : []);
+  /** A table in a frame, as Markdown (#384). */
+  const tableOf = (frame: Element): string => {
+    const table = children(frame).find((c) => c.localName === "table");
+    if (!table) return "";
+    const rows = descendants(table, "table-row").map((row) => children(row).filter((c) => c.localName === "table-cell")
+      .map((cell) => children(cell).map(inline).join("\n").trim()));
+    return rows.length ? markdownTable(rows) : "";
   };
   const out: string[] = [];
   for (const number of chosen) {
     const slide = slides[number - 1];
     let title = "";
     const body: string[] = [];
-    for (const frame of children(slide).filter((c) => c.localName === "frame")) {
-      const text = lines(frame);
-      if (!title && attr(frame, "class") === "title") title = text.join(" ");
+    for (const shape of shapes(slide)) {
+      const table = shape.localName === "frame" ? tableOf(shape) : "";
+      if (table) {
+        body.push(table);
+        continue;
+      }
+      const text = lines(shape);
+      if (!title && attr(shape, "class") === "title") title = text.join(" ");
       else body.push(...text.map((line) => line.replace(/^( *)/, "$1- ")));
     }
     const notesElement = children(slide).find((c) => c.localName === "notes");

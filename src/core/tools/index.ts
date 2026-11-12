@@ -1,5 +1,6 @@
 /** The ported tools, in the order the Python runtime offers them (make_all_builtin_tools). */
 
+import type { IsPluginBlock } from "../contentRisks";
 import type { VaultPort } from "../vault";
 import { makeMemoryTools, type MemorySettings } from "./memoryTools";
 import { makeMetadataTools } from "./metadataTools";
@@ -7,6 +8,7 @@ import { makeSearchTools } from "./searchTools";
 import specs from "./specs.json";
 import { makeTaskNotesTools } from "./tasknotesTools";
 import type { Tool } from "./tool";
+import { makeListingTools } from "./listingTools";
 import { makeVaultTools } from "./vaultTools";
 
 export type { Tool } from "./tool";
@@ -17,12 +19,15 @@ export interface ToolOptions {
   memory?: MemorySettings | null;
   /** The vault's config folder, where TaskNotes keeps its settings (Obsidian's `configDir`, #164). */
   configDir?: string;
+  /** Which code-block languages another plugin runs, in this Obsidian (#395). */
+  isPluginBlock?: IsPluginBlock;
 }
 
 /** The tools that run anywhere: on the file system under Node, and on Obsidian's vault. */
 export function makeTools(vault: VaultPort, scope: string[] | null = null, options: ToolOptions = {}): Tool[] {
   return inSpecOrder([
-    ...makeVaultTools(vault, scope),
+    ...makeVaultTools(vault, scope, { isPluginBlock: options.isPluginBlock }),
+    ...makeListingTools(vault, scope),
     ...makeSearchTools(vault, scope),
     ...makeTaskNotesTools(vault, scope, options.configDir),
     ...makeMetadataTools(vault, scope),

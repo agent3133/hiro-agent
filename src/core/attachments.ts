@@ -7,7 +7,7 @@ import { getCloseMatches } from "./difflib";
 import { basename } from "./paths";
 
 const KINDS: [string[], string][] = [
-  [["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "avif", "heic"], "image"],
+  [["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "avif", "heic", "heif", "ico"], "image"],
   [["pdf"], "PDF"],
   [["m4a", "mp3", "wav", "ogg", "opus", "flac", "aac", "3gp"], "recording"],
   [["mp4", "webm", "avi", "mov", "mkv"], "video"],

@@ -79,6 +79,11 @@ describe("runTurn", () => {
     expect(result.reply).toBe(REASONING_ONLY_NOTE);
   });
 
+  it("names the plugin's own setting in that note, not the terminal's /think (#402)", () => {
+    expect(REASONING_ONLY_NOTE).toContain("Enable thinking for this connection (Settings → Hiro Agent → Connections)");
+    expect(REASONING_ONLY_NOTE).not.toContain("/think");
+  });
+
   it("reports a throwing tool to the model as an error result instead of failing the turn", async () => {
     const results: [string, boolean][] = [];
     const model = scripted({ toolCalls: [call("find_notes", { pattern: "x" })] }, { content: "sorry" });
@@ -134,6 +139,21 @@ describe("runTurn", () => {
                           "result:c_read_note:text of a.md", "token:A"]);
   });
 
+  it("reports usage to onSpent once per model call", async () => {
+    const spent: [number, number][] = [];
+    const model = scripted({ toolCalls: [call("read_note")] }, { content: "done",
+                                                                  usage: { promptTokens: 120, completionTokens: 15 } });
+    await runTurn(options(model, { events: { onSpent: (input, output) => spent.push([input, output]) } }));
+    expect(spent).toEqual([[120, 15]]);
+  });
+
+  it("does not report usage when the completion has none", async () => {
+    const spent: [number, number][] = [];
+    const model = scripted({ toolCalls: [call("read_note")] }, { content: "done" });
+    await runTurn(options(model, { events: { onSpent: (input, output) => spent.push([input, output]) } }));
+    expect(spent).toEqual([]);
+  });
+
   it("stops when the turn is cancelled", async () => {
     const controller = new AbortController();
     const model = scripted(() => {
@@ -168,7 +188,7 @@ describe("confirmations", () => {
     ran.length = 0;
     const model = update({ path: "a.md", content: "x" });
     await runTurn(options(model, { tools: [updateNote] }));
-    expect(resultOf(model)).toBe("Error: 'update_note' requires user confirmation, but no interactive terminal is available.");
+    expect(resultOf(model)).toBe("Error: 'update_note' needs the user's confirmation, and there is no one to ask here.");
     expect(ran).toEqual([]);
   });
 

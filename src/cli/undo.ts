@@ -3,7 +3,7 @@
  * answers run with `agent:ask`, and for any other the journal still holds. It reads the same journal as the chat,
  * so neither can undo over the other, and like the chat it skips a file edited since the agent wrote it.
  *
- * The journal lives in memory (the last 20 answers): a plugin reload forgets what can be undone.
+ * The journal holds the last 20 answers, kept on this device across restarts and reloads (#410).
  */
 
 import type { TurnSummary, UndoResult } from "../api/types";
@@ -27,7 +27,7 @@ export interface UndoParams {
 
 /** The answers that can be undone, newest first, one per line. */
 export function listText(turns: TurnSummary[]): string {
-  if (!turns.length) return "Nothing to undo: no answer changed anything since Obsidian started the plugin.";
+  if (!turns.length) return "Nothing to undo: no answer the journal still holds changed anything.";
   return turns.map((turn) => {
     const prompt = turn.prompt.replace(/\s+/g, " ").trim();
     const short = prompt.length > 60 ? `${prompt.slice(0, 59)}…` : prompt;
@@ -47,7 +47,7 @@ export async function undo(host: UndoHost, params: UndoParams): Promise<string> 
   const turn = id ? turns.find((t) => t.id === id) : turns.find((t) => !t.undone);
   if (!turn) {
     return failed(id ? `no answer '${id}' is kept for undo; agent:undo list shows the ones that are`
-      : "nothing to undo: no answer changed anything since Obsidian started the plugin");
+      : "nothing to undo: no answer the journal still holds changed anything");
   }
   if (turn.undone) return failed(`what answer '${turn.id}' changed is already undone`);
 

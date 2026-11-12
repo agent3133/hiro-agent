@@ -19,9 +19,17 @@ export interface McpServerStatus {
   approved: boolean;
 }
 
-export type McpTest = { ok: true; tools: McpTool[] } | { ok: false; error: string };
+/** How long the Agents tab waits for http servers it lists by itself (#403). */
+const LIST_WAIT_MS = 5000;
+/** How long before an http server that did not list its tools is asked again by the Agents tab. */
+const LIST_AGAIN_MS = 60_000;
+
+export type McpTest ={ ok: true; tools: McpTool[] } | { ok: false; error: string };
 
 export class McpService {
+  /** When the Agents tab last asked each unlisted http server for its tools (#403). */
+  private readonly askedAt = new Map<string, number>();
+
   constructor(private readonly values: () => Record<string, unknown>, readonly manager: McpManager,
               private readonly approvals: McpApprovals) {}
 
@@ -63,12 +71,24 @@ export class McpService {
   }
 
   /**
-   * The Agents tab's MCP switches: the tools of the servers that are on and may run, as each last listed them —
-   * opening the tab or saving an agent starts no server (#178). A server not listed yet shows once a turn or its
-   * Test has connected.
+   * The Agents tab's MCP switches: the tools of the servers that are on and may run, as each last listed them.
+   * An http server not listed yet is asked for its tools here (#403): that starts no program. A stdio server is not
+   * — opening the tab starts no program (#178) — and shows once a turn or its Test has connected.
    */
   async toolInfos(): Promise<ToolInfo[]> {
     const specs = this.servers().filter((spec) => spec.enabled);
+    // Each one at most once a minute: one that does not answer would hold every redraw of the page otherwise
+    const now = Date.now();
+    const unlisted = specs.filter((spec) => spec.transport === "http" && this.approvals.approved(spec)
+                                            && !this.manager.isListed(spec.name)
+                                            && now - (this.askedAt.get(spec.name) ?? 0) >= LIST_AGAIN_MS);
+    for (const spec of unlisted) this.askedAt.set(spec.name, now);
+    // One that does not answer is left as it was: Features → MCP servers → Test says why. The page waits a few
+    // seconds at most; a slower server's tools show the next time it is drawn
+    if (unlisted.length) {
+      await Promise.race([Promise.allSettled(unlisted.map((spec) => this.manager.tools(spec))),
+                          new Promise((resolve) => setTimeout(resolve, LIST_WAIT_MS))]);
+    }
     return mcpToolInfos(specs, this.manager.knownTools(specs.filter((spec) => this.approvals.approved(spec))));
   }
 

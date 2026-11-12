@@ -1,17 +1,14 @@
 /**
  * A small streaming client for OpenAI-compatible chat completions (llama.cpp, vLLM, OpenAI), without a dependency.
  *
- * It goes over Node's http/https, which Obsidian's desktop app and Node both have: Obsidian's requestUrl cannot
- * stream, and the renderer's fetch is blocked cross-origin (see plugin/src/api/http.ts).
+ * It goes through the core's network port (core/http.ts, #418), on desktop Node's http/https (net/nodeHttp.ts):
+ * Obsidian's requestUrl cannot stream, and the renderer's fetch is blocked cross-origin (see plugin/src/api/http.ts).
  *
  * Thinking arrives as `reasoning_content` deltas (docs/thinking-model-streaming.md); tool calls arrive in pieces,
  * keyed by `index`.
  */
 
-import * as http from "node:http";
-import * as https from "node:https";
-
-import { certificateAuthorities } from "../tlsTrust";
+import { httpPort, type HttpPort } from "../http";
 
 export interface ToolCallRequest {
   id: string;
@@ -105,6 +102,8 @@ export const IDLE_TIMEOUT_MS = 2 * 60_000;
 
 /** The connection and the sampling settings Python's `_sampling_kwargs` sends (runner.py). */
 export interface LlmSettings {
+  /** The network to send through (#418); the port the plugin registered when not given. */
+  http?: HttpPort;
   /** Silence allowed before the first byte and between chunks; FIRST_BYTE_TIMEOUT_MS and IDLE_TIMEOUT_MS unless set. */
   timeouts?: { firstByteMs: number; idleMs: number };
   baseUrl: string;
@@ -311,17 +310,46 @@ interface ChunkChoice {
   finish_reason?: string | null;
 }
 
+/** Optional settings a server may refuse for one model and that the turn can do without. */
+const DROPPABLE = ["temperature", "top_p", "presence_penalty", "top_k", "min_p", "repetition_penalty",
+                   "service_tier"];
+
+/**
+ * The setting a 400 refused (`Unsupported parameter: 'temperature' ...`), when it is one *body* holds and the turn
+ * can do without; else undefined.
+ */
+export function refusedSetting(status: number, text: string, body: Record<string, unknown>): string | undefined {
+  if (status !== 400) return undefined;
+  const match = /unsupported (?:parameter|value)[^']*'([a-z_]+)'/i.exec(text);
+  const key = match?.[1]?.toLowerCase();
+  return key && DROPPABLE.includes(key) && key in body ? key : undefined;
+}
+
+export function withoutDropped(body: Record<string, unknown>, dropped: Set<string>): Record<string, unknown> {
+  for (const key of dropped) delete body[key];
+  return body;
+}
+
 /** A ChatModel talking to an OpenAI-compatible server. */
 export class OpenAiChat implements ChatModel {
   /** Whether to ask for usage in the stream; off for a server that refused `stream_options` once (#151). */
   private streamUsage = true;
 
+  /** Sampling settings the model refused (OpenAI's reasoning models take no temperature): not sent from then on. */
+  private readonly dropped = new Set<string>();
+
   constructor(private readonly settings: LlmSettings) {}
 
   complete(request: ChatRequest, deltas: Deltas, signal?: AbortSignal): Promise<Completion> {
     const asked = this.streamUsage;
-    const body = requestBody(this.settings, request, asked);
+    const body = withoutDropped(requestBody(this.settings, request, asked), this.dropped);
     return postStream(this.settings, "chat/completions", body, new CompletionBuilder(deltas), signal, (status, text, host) => {
+      const key = refusedSetting(status, text, body);
+      if (key) {
+        this.dropped.add(key);
+        this.settings.log?.(`${host} does not take ${key} for this model; sent again without it.`);
+        return this.complete(request, deltas, signal);
+      }
       // A strict server that does not know stream_options: ask again without it, and from now on
       if (asked && status === 400 && /stream_options/i.test(text)) {
         this.streamUsage = false;
@@ -369,7 +397,8 @@ export function postStream(settings: LlmSettings, path: string, payload: Record<
                            signal: AbortSignal | undefined, refused: Refusal): Promise<Completion> {
   const url = new URL(`${settings.baseUrl.replace(/\/+$/, "")}/${path}`);
   const body = JSON.stringify(payload);
-  const transport = url.protocol === "https:" ? https : http;
+  // The network through the core's port (#418): the plugin's Node implementation, or the one given with the settings
+  const port = httpPort(settings.http);
   const headers: Record<string, string | number> = {
     "Content-Type": "application/json", Accept: "text/event-stream",
     "Content-Length": new TextEncoder().encode(body).byteLength,
@@ -384,25 +413,21 @@ export function postStream(settings: LlmSettings, path: string, payload: Record<
     let timer: ReturnType<typeof setTimeout> | undefined;
     const quiet = (ms: number, what: string): void => {
       clearTimeout(timer);
-      timer = setTimeout(() => req.destroy(new Error(
+      timer = setTimeout(() => call.destroy(new Error(
         `${url.host} ${what} for ${Math.round(ms / 1000)} seconds, so the answer was stopped. Is the model server `
         + "still running?")), ms);
     };
     const done = (): void => clearTimeout(timer);
-    // A connection of its own per request (agent: false). Node's default agent keeps connections alive, and a
-    // request sent right after the last response — a tool that answers at once — reused the socket llama-server
-    // was closing, and the turn died with ECONNRESET.
-    // The system's certificates too, as requestUrl trusts them: a reverse proxy with one's own CA (#113)
-    const ca = url.protocol === "https:" ? certificateAuthorities() : undefined;
-    const req = transport.request(url, { method: "POST", headers, signal, agent: false, ...(ca ? { ca } : {}) }, (res) => {
-      res.setEncoding("utf-8");
+    const call = port.request({ url, method: "POST", headers, body, signal }, (res) => {
+      // Bytes to text as they come: a character split across two chunks is joined, not garbled
+      const text = new TextDecoder("utf-8");
       quiet(idleMs, "sent nothing more");
-      if ((res.statusCode ?? 0) >= 400) {
-        let text = "";
-        res.on("data", (part: string) => (text += part));
-        res.on("end", () => {
+      if (res.status >= 400) {
+        let refusal = "";
+        res.onData((part) => (refusal += text.decode(part, { stream: true })));
+        res.onEnd(() => {
           done();
-          const outcome = refused(res.statusCode ?? 0, text, url.host);
+          const outcome = refused(res.status, refusal + text.decode(), url.host);
           if (outcome instanceof Error) reject(outcome);
           else resolve(outcome);
         });
@@ -414,29 +439,27 @@ export function postStream(settings: LlmSettings, path: string, payload: Record<
           for (const payload of payloads) parser.add(payload);
           return true;
         } catch (error) {
-          req.destroy();
+          call.destroy();
           reject(error);
           return false;
         }
       };
-      res.on("data", (part: string) => {
+      res.onData((part) => {
         quiet(idleMs, "sent nothing more");
-        void take(decoder.push(part));
+        void take(decoder.push(text.decode(part, { stream: true })));
       });
-      res.on("end", () => {
+      res.onEnd(() => {
         done();
-        if (take(decoder.flush())) resolve(parser.result());
+        if (take([...decoder.push(text.decode()), ...decoder.flush()])) resolve(parser.result());
       });
-      res.on("error", (error) => {
+      res.onError((error) => {
         done();
         reject(error);
       });
-    });
-    req.on("error", (error) => {
+    }, (error) => {
       done();
       reject(error);
     });
     quiet(firstByteMs, "did not start answering");
-    req.end(body);
   });
 }

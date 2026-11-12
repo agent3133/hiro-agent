@@ -1,6 +1,8 @@
 // What this device approves of what the synced settings send keys to or run (#136).
 import { describe, expect, it } from "vitest";
 
+import { isLoopbackUrl } from "../core/loopback";
+
 import { changedApprovals, connectionApproval, DeviceApprovals, programsApproval, requiredApprovals }
   from "./deviceApprovals";
 
@@ -20,9 +22,14 @@ describe("a connection's key", () => {
     });
   });
 
-  it("needs none when the connection sends no key", () => {
+  it("needs none when the connection sends no key to a server on this computer", () => {
     expect(connectionApproval(CLOUD, "local")).toBeNull();
-    expect(connectionApproval({ llm_profiles: { x: { api_key: "written-out" } } }, "x")).toBeNull();
+  });
+
+  it("asks about a connection without a key on another computer: the messages go there (#407)", () => {
+    // A written-out key is no key: the turn refuses it, but the address is still where the messages would go
+    expect(connectionApproval({ llm_profiles: { x: { api_key: "written-out" } } }, "x")?.what)
+      .toBe("sends your messages to https://api.openai.com/v1");
   });
 
   it("goes to OpenAI's address when an openai connection names none, and to the bare llm section by ''", () => {
@@ -58,13 +65,6 @@ describe("the audio programs", () => {
 });
 
 describe("the approvals kept on this device", () => {
-  it("start uninitialised, and are once anything, even nothing, was approved", () => {
-    const { approvals } = store();
-    expect(approvals.initialized()).toBe(false);
-    approvals.approve();
-    expect(approvals.initialized()).toBe(true);
-  });
-
   it("hold for the fingerprint approved, and not for a changed one", () => {
     const { approvals } = store();
     const approval = connectionApproval(CLOUD, "cloud")!;
@@ -77,8 +77,40 @@ describe("the approvals kept on this device", () => {
 
   it("survive a store that holds something else", () => {
     const approvals = new DeviceApprovals(() => ["junk"], () => undefined);
-    expect(approvals.initialized()).toBe(false);
     expect(approvals.approved(connectionApproval(CLOUD, "cloud")!)).toBe(false);
+  });
+});
+
+describe("a connection's address", () => {
+  it("approves a message-only connection to another computer", () => {
+    const approval = connectionApproval({ llm_profiles: { lan: { base_url: "http://192.168.1.20:8080/v1" } } }, "lan");
+    expect(approval).toEqual({
+      id: "connection:lan",
+      fingerprint: JSON.stringify(["http://192.168.1.20:8080/v1", ""]),
+      what: "sends your messages to http://192.168.1.20:8080/v1",
+    });
+  });
+
+  it("needs none for a server on this computer", () => {
+    expect(connectionApproval({ llm_profiles: { me: { base_url: "http://127.0.0.1:8080" } } }, "me")).toBeNull();
+    expect(connectionApproval({ llm_profiles: { me: { base_url: "http://localhost:11434" } } }, "me")).toBeNull();
+  });
+
+  it("is approved while the address stands, and not once it moves", () => {
+    const { approvals } = store();
+    const approval = connectionApproval({ llm_profiles: { lan: { base_url: "http://192.168.1.20:8080/v1" } } }, "lan")!;
+    approvals.approve(approval);
+    expect(approvals.approved(approval)).toBe(true);
+    const moved = connectionApproval({ llm_profiles: { lan: { base_url: "http://203.0.113.5:8080/v1" } } }, "lan")!;
+    expect(approvals.approved(moved)).toBe(false);
+  });
+});
+
+describe("isLoopbackUrl", () => {
+  it("is true for a loopback address, false for one on another computer or one that does not parse", () => {
+    expect(isLoopbackUrl("http://[::1]:8080/")).toBe(true);
+    expect(isLoopbackUrl("https://example.com")).toBe(false);
+    expect(isLoopbackUrl("not a url")).toBe(false);
   });
 });
 

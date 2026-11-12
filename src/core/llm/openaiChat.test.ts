@@ -1,6 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import { CompletionBuilder, requestBody, SseDecoder } from "./openaiChat";
+import { CompletionBuilder, refusedSetting, requestBody, SseDecoder, withoutDropped } from "./openaiChat";
+
+describe("a setting the model refuses", () => {
+  const refusal = JSON.stringify({ error: { message: "Unsupported parameter: 'temperature' is not supported with this model." } });
+
+  it("is named from OpenAI's 400 when the request held it", () => {
+    expect(refusedSetting(400, refusal, { model: "m", temperature: 0.7 })).toBe("temperature");
+    expect(refusedSetting(400, "Unsupported value: 'top_p' does not support 0.8", { top_p: 0.8 })).toBe("top_p");
+  });
+
+  it("is not named for another status, an absent key or a setting the turn needs", () => {
+    expect(refusedSetting(500, refusal, { temperature: 0.7 })).toBeUndefined();
+    expect(refusedSetting(400, refusal, { model: "m" })).toBeUndefined();
+    expect(refusedSetting(400, "Unsupported parameter: 'messages'", { messages: [] })).toBeUndefined();
+  });
+
+  it("is left out of the next body", () => {
+    expect(withoutDropped({ model: "m", temperature: 0.7, top_p: 1 }, new Set(["temperature"]))).toEqual({ model: "m", top_p: 1 });
+  });
+});
 
 /** Chunk streams shaped like llama.cpp's (server b6xxx, Qwen3.6), one `data:` event per string. */
 const sse = (...chunks: object[]): string =>

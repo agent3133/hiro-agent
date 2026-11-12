@@ -23,21 +23,26 @@ import { defaultProfileName, hasConnection, migrateBareLlm, profileSummaries, re
 import { addLocalServer, findLocalServers, type Profiles } from "./settings/connections";
 import { probe } from "./settings/probe";
 import { registerCli } from "./cli/register";
+import { RunningAsks } from "./cli/stop";
+import { openUndoPicker } from "./view/UndoPicker";
+import { setHttpPort } from "./core/http";
+import { nodeHttp } from "./net/nodeHttp";
 import type { AgentStatus } from "./cli/status";
 import { ConfigStore, withoutObsolete } from "./config/store";
 import { KEYCHAIN_NAME, migrateDeviceApprovals, migrateMcpApprovals, migrateReferences,
          renameConnectionApproval, renames }
   from "./config/keychainRefs";
-import { changedApprovals, connectionApproval, DEVICE_APPROVALS_KEY, DeviceApprovals, programsApproval,
-  requiredApprovals } from "./config/deviceApprovals";
+import { changedApprovals, connectionApproval, DEVICE_APPROVALS_KEY, DeviceApprovals, programsApproval }
+  from "./config/deviceApprovals";
 import { APPROVALS_KEY, McpApprovals } from "./mcp/approvals";
-import { mcpServers, needsApproval } from "./mcp/servers";
 import { switchedOffTools } from "./config/features";
 import { McpManager, type McpTool } from "./mcp/manager";
 import { nodeFetch } from "./mcp/nodeFetch";
 import { McpService } from "./mcp/service";
 import { listSessions } from "./core/sessions";
-import { obsidianVault, setRecorder } from "./vault/obsidianVault";
+import { DEFAULT_MEMORY, readUserProfile, saveUserProfile } from "./core/tools/memoryTools";
+import { ProfileModal } from "./view/ProfileModal";
+import { obsidianVault } from "./vault/obsidianVault";
 import { nodePrograms } from "./vault/programs";
 import { registerToolCli } from "./vault/toolCli";
 import { toolsetOptions, type ToolsetOptions } from "./vault/toolset";
@@ -54,6 +59,8 @@ export default class ObsidianAgentPlugin extends Plugin {
   override settings: PluginSettings = { ...DEFAULT_SETTINGS };  // Plugin declares `settings?: unknown`
   private readonly log: string[] = [];
   private commands: AgentCommands | null = null;
+  /** The answers `agent:ask` is running, for `agent:stop` (#415). */
+  private readonly runningAsks = new RunningAsks();
   // The agent's configuration and agents, kept by the plugin (#86), and the agent that answers in the plugin
   private readonly store = new ConfigStore(() => this.settings.agentConfig, async (values) => {
     // A change made here approves what it changed on this device (#136); one that arrives by sync does not pass
@@ -101,7 +108,22 @@ export default class ObsidianAgentPlugin extends Plugin {
     mcp: this.mcpManager,
     deviceApprovals: this.deviceApprovals,
     log: (line) => this.addLog(line),
+    // The undo journal outlives a restart (#410): a file in the plugin's own folder, which the agent's tools cannot
+    // reach (the config folder is protected, #135)
+    journalStore: {
+      load: async () => {
+        const path = this.journalPath();
+        return (await this.app.vault.adapter.exists(path))
+          ? JSON.parse(await this.app.vault.adapter.read(path)) as unknown : null;
+      },
+      save: (data) => this.app.vault.adapter.write(this.journalPath(), JSON.stringify(data)),
+    },
   }, () => this.toolsetOptions());
+
+  /** Where the undo journal is kept on this device (#410). */
+  private journalPath(): string {
+    return `${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/undo-journal.json`;
+  }
 
   /** The MCP servers, for the settings (#87). */
   mcp(): McpService {
@@ -145,18 +167,6 @@ export default class ObsidianAgentPlugin extends Plugin {
     const values = this.store.values();
     const approval = kind === "connection" ? connectionApproval(values, name) : programsApproval(values);
     if (approval) this.deviceApprovals.approve(approval);
-  }
-
-  /**
-   * The first start of a version that asks for approvals, on this device: what is configured already ran without
-   * asking before, so it is approved as it stands; from now on only changes made here approve themselves (#136).
-   */
-  private approveWhatIsThere(): void {
-    const values = this.store.values();
-    this.deviceApprovals.approve(...requiredApprovals(values));
-    for (const spec of mcpServers(values)) {
-      if (spec.transport !== "stdio" && needsApproval(spec) && !this.mcpApprovals.approved(spec)) this.mcpApprovals.approve(spec);
-    }
   }
 
   /**
@@ -227,8 +237,12 @@ export default class ObsidianAgentPlugin extends Plugin {
   }
 
   override async onload(): Promise<void> {
+    // The core reaches the network through its port (#418): on desktop, Node's http/https
+    setHttpPort(nodeHttp);
     await this.loadSettings();
-    if (!this.deviceApprovals.initialized()) this.approveWhatIsThere();
+    // Nothing is approved by itself, not even on this device's first start: settings that arrived by sync — a new
+    // computer opening a synced vault — wait for Approve like any synced change (#396). Settings made on this
+    // device approve themselves as they are saved (the store above)
     this.settingTab = new AgentSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     // Checked first, with Obsidian's own flag: the command line and everything below need the desktop app (#183).
@@ -237,9 +251,8 @@ export default class ObsidianAgentPlugin extends Plugin {
       new Notice("Hiro Agent runs on desktop only for now.");
       return;
     }
-    if (this.developer()) {
-      registerToolCli(this, this.app, () => this.toolsetOptions());
-    }
+    // Always there, refused while Developer is off: the switch applies at once, without a reload (#397)
+    registerToolCli(this, this.app, () => this.toolsetOptions(), () => this.developer());
     registerCli(this, {
       status: () => this.cliStatus(),
       agents: async () => (await this.pluginBackend.refresh()).agents,
@@ -254,7 +267,9 @@ export default class ObsidianAgentPlugin extends Plugin {
         developer: () => this.developer(),
         notice: (text) => new Notice(text, 10_000),
         sessionName: (prompt) => sessionNameFor(prompt),
+        running: this.runningAsks,
       },
+      running: this.runningAsks,
       undo: {
         turns: () => this.inProcess.turns(),
         turnDiff: (id) => this.inProcess.turnDiff(id),
@@ -288,6 +303,7 @@ export default class ObsidianAgentPlugin extends Plugin {
           await this.configChanged();
           return null;
         },
+        addKey: () => void this.settingTab?.addConnection(),
         openSettings: () => this.openSettings(),
       },
       rememberKeep: (keep: boolean) => {
@@ -337,6 +353,13 @@ export default class ObsidianAgentPlugin extends Plugin {
       callback: () => void this.newChatWindow(),
     });
 
+    // The answers the undo journal holds, also after a restart, when their footers are gone (#410)
+    this.addCommand({
+      id: "undo-earlier-answer",
+      name: "Undo an earlier answer",
+      callback: () => void openUndoPicker(this.app, this.inProcess),
+    });
+
     // The conversation of the chat used last (#286)
     this.addCommand({
       id: "rename-conversation",
@@ -345,6 +368,12 @@ export default class ObsidianAgentPlugin extends Plugin {
         await this.openChat();
         this.currentChat()?.renameConversation();
       },
+    });
+    // The profile Memory keeps, in a folder Obsidian does not open: read and edited here (#401)
+    this.addCommand({
+      id: "edit-memory-profile",
+      name: "Edit the memory profile",
+      callback: () => this.editProfile(),
     });
     this.commands = new AgentCommands(this, {
       agents: () => this.pluginBackend.info().agents,
@@ -368,8 +397,6 @@ export default class ObsidianAgentPlugin extends Plugin {
   }
 
   override onunload(): void {
-    // The journal's recorder is module state in obsidianVault: a reloaded plugin starts without one (#177)
-    setRecorder(null);
     // Obsidian does not wait for onunload: the MCP servers close in the background
     void this.mcpManager.closeAll().catch(() => undefined);
   }
@@ -477,11 +504,38 @@ export default class ObsidianAgentPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /**
+   * `data.json` changed on disk — by sync, from another device (#396): read again, so the connections and agents
+   * added there show here, and the next save here writes them back rather than the settings as they were. What
+   * arrived is not approved on this device: it waits for Approve, as before.
+   */
+  override async onExternalSettingsChange(): Promise<void> {
+    await this.loadSettings();
+    this.addLog("Settings changed on disk (by sync): read again.");
+    await this.configChanged();
+    await this.agentsChanged();
+  }
+
   /** This plugin's tab in Obsidian's settings. `app.setting` is not in the published API, but every plugin uses it. */
   openSettings(): void {
     const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): unknown } }).setting;
     setting?.open();
     setting?.openTabById(this.manifest.id);
+  }
+
+  /** The memory profile in a dialog, where the settings keep it, whether Memory is on or not (#401). */
+  editProfile(): ProfileModal {
+    const memory = (this.store.values().memory ?? {}) as Record<string, unknown>;
+    const path = typeof memory.profile_path === "string" ? memory.profile_path : DEFAULT_MEMORY.profilePath;
+    // Not recorded: the user's own edit is no answer's change to undo
+    const vault = obsidianVault(this.app, { record: false });
+    const modal = new ProfileModal(this.app, {
+      path,
+      read: () => readUserProfile(vault, path),
+      save: (text) => saveUserProfile(vault, path, text),
+    });
+    modal.open();
+    return modal;
   }
 
   /** After a config write: the connections may have changed, and the chat's connection picker should list them. */

@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TurnHandlers } from "../api/types";
+import { RunningAsks } from "./stop";
 import { ask, askText, renderAsk, type AskHost, type AskParams } from "./ask";
 
 interface Fake {
@@ -130,6 +131,42 @@ describe("agent:ask, the turn", () => {
     expect(result).toMatchObject({ ok: true, stopped: true, reply: "half" });
     expect(askText(result)).toContain("[stopped after the timeout; what was said so far is above]");
     expect(made.notices[1]).toContain("was stopped after 5 s");
+  });
+
+  it("lists the running answer under its session name for agent:stop, and forgets it when the turn ends (#415)", async () => {
+    const made = fake();
+    const running = new RunningAsks();
+    made.host.running = running;
+    const answer = ask(made.host, { prompt: "x", session: "2026-09-29-1200-do-it" });
+    await vi.waitFor(() => expect(running.list().length).toBe(1));
+    expect(running.list()[0].session).toBe("2026-09-29-1200-do-it");
+    made.handlers().onDone("done", false, { tool_calls: 0 }, null, 0);
+    await answer;
+    expect(running.list()).toEqual([]);
+  });
+
+  it("lets agent:stop cancel the turn and print what was said so far (#415)", async () => {
+    const made = fake();
+    const running = new RunningAsks();
+    made.host.running = running;
+    const answer = ask(made.host, { prompt: "x", session: "2026-09-29-1200-do-it" });
+    await vi.waitFor(() => expect(running.list().length).toBe(1));
+    running.list()[0].stop();
+    expect(made.cancelled).toEqual(["t1"]);
+    made.handlers().onDone("half", true, { tool_calls: 0 }, null, 0);
+    const result = await answer;
+    expect(result).toMatchObject({ ok: true, stopped: true, stopped_by: "agent:stop" });
+    expect(askText(result)).toContain("[stopped with agent:stop; what was said so far is above]");
+    expect(made.notices[made.notices.length - 1]).toContain("was stopped with agent:stop");
+  });
+
+  it("says in its running notice that obsidian agent:stop stops it (#415)", async () => {
+    const made = fake();
+    const answer = ask(made.host, { prompt: "x", session: "2026-09-29-1200-do-it" });
+    await vi.waitFor(() => expect(made.sent.length).toBe(1));
+    expect(made.notices[0]).toContain("obsidian agent:stop");
+    made.handlers().onDone("done", false, { tool_calls: 0 }, null, 0);
+    await answer;
   });
 
   it("with keep=false keeps the conversation in memory under its name, but saves nothing, and says so", async () => {

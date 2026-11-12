@@ -6,7 +6,7 @@
 
 import { type App, Modal, SecretComponent, Setting } from "obsidian";
 
-import { draftProblem, type ConnectionDraft } from "./connections";
+import { clearTextKeyWarning, draftProblem, type ConnectionDraft } from "./connections";
 
 export interface ConnectionFormHost {
   app: App;
@@ -50,7 +50,7 @@ export class ConnectionModal extends Modal {
                + "you run: llama.cpp (http://127.0.0.1:8080), Ollama (http://127.0.0.1:11434), LM Studio (:1234), "
                + "vLLM (:8000). What kind of server it is, is found out.")
       .addText((text) => text.setPlaceholder("https://api.openai.com/v1")
-        .setValue(this.draft.baseUrl).onChange((value) => { this.draft.baseUrl = value.trim(); }));
+        .setValue(this.draft.baseUrl).onChange((value) => { this.draft.baseUrl = value.trim(); showClearText(); }));
     // Typed freely, with the server's models as suggestions once a test has listed them
     const suggestions = contentEl.createEl("datalist", { attr: { id: `obsidian-agent-models-${++lists}` } });
     new Setting(contentEl).setName("Model")
@@ -65,7 +65,16 @@ export class ConnectionModal extends Modal {
       .setDesc("From Obsidian's keychain (Settings → Keychain): pick an entry, or add one here. The value stays in "
                + "the keychain. A server on this computer usually needs none.");
     new SecretComponent(this.app, key.controlEl).setValue(this.draft.key)
-      .onChange((value) => { this.draft.key = value; });
+      // Obsidian 1.14's types say a cleared entry is null: no key, as an empty one
+      .onChange((value) => { this.draft.key = value ?? ""; showClearText(); });
+    // A key over plain http to another computer (#408): said while the fields are filled in, and again on Test
+    const clearText = contentEl.createDiv({ cls: "setting-item-description mod-warning obsidian-agent-clear-text" });
+    const showClearText = (): void => {
+      const warning = clearTextKeyWarning(this.draft);
+      clearText.setText(warning ?? "");
+      clearText.toggle(warning !== null);
+    };
+    showClearText();
 
     const result = contentEl.createDiv({ cls: "setting-item-description obsidian-agent-connection-result" });
     new Setting(contentEl)
@@ -76,8 +85,9 @@ export class ConnectionModal extends Modal {
         const verdict = await this.host.test(this.draft);
         suggestions.empty();
         for (const model of verdict.models ?? []) suggestions.createEl("option", { attr: { value: model } });
-        result.setText(verdict.text);
-        result.toggleClass("mod-warning", !verdict.ok);
+        const warning = clearTextKeyWarning(this.draft);
+        result.setText(warning ? `${verdict.text} ${warning}` : verdict.text);
+        result.toggleClass("mod-warning", !verdict.ok || warning !== null);
         button.setDisabled(false);
       }))
       .addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))

@@ -1,6 +1,6 @@
 {
   "name": "hiro-agent",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Chat with an AI agent that reads, searches, writes and moves your notes through your own model: a local llama.cpp server or any OpenAI-compatible API. No external CLI.",
   "license": "AGPL-3.0-or-later",
   "private": true,
@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "agent": "node scripts/run-agent.mjs",
     "test": "vitest run",
+    "coverage": "vitest run --coverage",
     "notices": "node scripts/notices.mjs",
     "check-notices": "node scripts/notices.mjs --check",
     "lint": "eslint ."
@@ -22,14 +23,15 @@
     "@eslint/json": "^0.14.0",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.10.2",
-    "esbuild": "^0.24.2",
+    "@vitest/coverage-v8": "^5.1.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.39.5",
-    "eslint-plugin-obsidianmd": "^0.4.2",
+    "eslint-plugin-obsidianmd": "^0.5.1",
     "jsdom": "^29.1.1",
-    "obsidian": "^1.13.1",
+    "obsidian": "^1.14.4",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.71.1",
-    "vitest": "^3.2.7"
+    "vitest": "^5.1.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

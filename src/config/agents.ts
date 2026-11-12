@@ -12,7 +12,7 @@
 import { parseDocument } from "yaml";
 
 import type { AgentDetail, AgentFields, AgentSource, AgentSummary, AgentWrite, ConfigFieldError, ToolInfo } from "../api/types";
-import { readFrontmatter } from "../core/frontmatter";
+import { frontmatterProblem, readFrontmatter } from "../core/frontmatter";
 import specs from "../core/tools/specs.json";
 import { OBSIDIAN_DIR } from "../core/paths";
 import type { VaultPort } from "../core/vault";
@@ -90,17 +90,26 @@ function mergeFrontmatter(block: string, changes: Record<string, unknown>): stri
  */
 export const RETIRED_TOOLS = ["git", "obsidian_cli", "tasknotes_cli", "web_search", "list_bases"];
 
+/** The bounds the settings give an agent's tool rounds per answer; a file is held to them as well (#397). */
+const MAX_ITERATIONS: [number, number] = [1, 200];
+
 function load(text: string, file: string, source: AgentSource, path: string): AgentDefinition {
   const meta = readFrontmatter(text).data;
   const list = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
   const optional = <T>(value: unknown, type: string): T | null => (typeof value === type ? value as T : null);
+  // A file whose frontmatter does not parse gives an agent with no tools: said where the agent is shown — the
+  // chat's picker, the commands, the Agents page — instead of an agent that answers it has no tools (#397)
+  const problem = frontmatterProblem(text);
+  const iterations = typeof meta.max_iterations === "number" && Number.isFinite(meta.max_iterations)
+    ? Math.min(MAX_ITERATIONS[1], Math.max(MAX_ITERATIONS[0], Math.round(meta.max_iterations))) : 50;
   return {
     name: typeof meta.name === "string" && meta.name ? meta.name : file.replace(/\.md$/, ""),
-    description: typeof meta.description === "string" ? meta.description : "",
+    description: problem ? `This agent's file cannot be read (${problem}): fix it in ${path}`
+      : typeof meta.description === "string" ? meta.description : "",
     prompt: split(text).prompt,
     model: optional<string>(meta.model, "string"),
     temperature: optional<number>(meta.temperature, "number"),
-    maxIterations: typeof meta.max_iterations === "number" ? meta.max_iterations : 50,
+    maxIterations: iterations,
     tools: list(meta.tools).filter((tool) => !RETIRED_TOOLS.includes(tool)),
     vaultScope: list(meta.vault_scope),
     llmProfile: optional<string>(meta.llm_profile, "string"),

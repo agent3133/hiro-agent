@@ -95,7 +95,14 @@ export function xlsxToMarkdown(parts: Map<string, string>, pages = ""): string {
     const rows: string[][] = [];
     for (const row of descendants(parseXml(xml), "row")) {
       const cells: string[] = [];
-      for (const c of children(row, "c")) cells[column(attr(c, "r") || "A1")] = value(c);
+      // A cell's reference is optional (ECMA-376), and some programs leave it out: such a cell is the next one (#381)
+      let next = 0;
+      for (const c of children(row, "c")) {
+        const reference = attr(c, "r");
+        const at = reference ? column(reference) : next;
+        cells[at] = value(c);
+        next = at + 1;
+      }
       const filled = Array.from(cells, (text) => text ?? "");
       if (filled.some((text) => text.trim())) rows.push(filled);
     }

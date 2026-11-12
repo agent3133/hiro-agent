@@ -17,7 +17,7 @@ import { mcpGroup } from "./settings/McpSection";
 import { BASIC_PATHS } from "./settings/basicPaths";
 import { advancedGroups } from "./settings/ConfigSections";
 import { findLocalServers, type LocalServer, type Profiles } from "./settings/connections";
-import { connectionGroup, type ProfilesHost } from "./settings/ProfilesSection";
+import { connectionGroup, openNewConnection, type ProfilesHost } from "./settings/ProfilesSection";
 import { probe } from "./settings/probe";
 import type ObsidianAgentPlugin from "./main";
 
@@ -92,6 +92,26 @@ export class AgentSettingTab extends PluginSettingTab {
     if (!quietly) this.update();
   }
 
+  /** What the Connections page and its form work with. */
+  private profilesHost(): ProfilesHost {
+    return {
+      app: this.app,
+      save: (values) => this.saveConfig(values),
+      probe: (url, headers) => probe(url, headers),
+      redraw: () => void this.reload(),
+      connectionApproval: (name) => this.plugin.approvalStatus("connection", name),
+      keychain: { app: this.app, names: () => this.plugin.keychainNames(), value: (name) => this.plugin.keychainValue(name) },
+      approveConnection: (name) => this.plugin.approveOnThisDevice("connection", name),
+    };
+  }
+
+  /** The form to add a connection, over whatever is open: the chat's *Use an API key* (#400). */
+  async addConnection(): Promise<void> {
+    if (!this.doc) await this.reload();
+    if (this.doc) openNewConnection(this.doc, this.profilesHost());
+    else new Notice(`Could not read the agent's configuration: ${this.problem}`);
+  }
+
   override getSettingDefinitions(): SettingDefinitionItem[] {
     const doc = this.doc;
     if (!doc) {
@@ -100,15 +120,7 @@ export class AgentSettingTab extends PluginSettingTab {
         : { name: "Loading the configuration…" }];
     }
     const redraw = (): void => void this.reload();
-    const host: ProfilesHost = {
-      app: this.app,
-      save: (values) => this.saveConfig(values),
-      probe: (url, headers) => probe(url, headers),
-      redraw,
-      connectionApproval: (name) => this.plugin.approvalStatus("connection", name),
-      keychain: { app: this.app, names: () => this.plugin.keychainNames(), value: (name) => this.plugin.keychainValue(name) },
-      approveConnection: (name) => this.plugin.approveOnThisDevice("connection", name),
-    };
+    const host = this.profilesHost();
     const client = this.plugin.backend();
     const mcp = this.plugin.mcp();
     return [
@@ -177,8 +189,8 @@ export class AgentSettingTab extends PluginSettingTab {
               + "delete, move or overwrite notes through the Obsidian command line without asking you. It lets "
               + "`obsidian agent:tool name=… args=…` run one of the agent's tools (destructive ones only with the "
               + "confirm flag), and `agent:ask … allow=destructive` change notes without the dialog, for unattended "
-              + "runs such as the benchmark. The command-line tool takes effect when the plugin reloads. The switch "
-              + "is kept on this device only: it does not sync with the vault.",
+              + "runs such as the benchmark. Switching it on or off takes effect at once. The switch is kept on this "
+              + "device only: it does not sync with the vault.",
         aliases: ["developer"],
         render: (setting) => {
           setting.addToggle((toggle) => toggle
@@ -206,6 +218,11 @@ export class AgentSettingTab extends PluginSettingTab {
         return true;
       },
       preview: (name, draft) => this.plugin.promptAsSent(name, draft),
+      // An MCP tool's Ask first (#403): a server setting, so through the config API like the default agent
+      setAskFirst: async (server, tool, ask) => {
+        const result = await this.saveConfig({ mcp_servers: { [server]: { ask_first: { [tool]: ask } } } });
+        return Boolean(result?.ok);
+      },
     };
   }
 

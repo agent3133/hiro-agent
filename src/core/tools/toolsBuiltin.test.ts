@@ -101,8 +101,10 @@ describe("test_tools_builtin.py", () => {
     }
     const vault = await makeVault(files);
     const result = await vault.tool("search_vault").run({ query: "findme", limit: 5 });
-    const lines = result.trim().split("\n").filter((ln) => ln);
+    // At most *limit* notes; since #416 a last line says how many more match, as list_notes does
+    const lines = result.trim().split("\n").filter((ln) => ln && !ln.startsWith("["));
     expect(lines.length).toBeLessThanOrEqual(5);
+    expect(result).toContain("[20 more notes match");
   });
 
   it("test_search_vault_returns_snippet", async () => {

@@ -121,6 +121,12 @@ export function scopePrompt(scope: string[] | null): string {
 export function safeResolve(relativePath: string, scope: string[] | null = null): string {
   const resolved = normalize(relativePath);
   if (resolved === null) throw new PathError(`Path escape attempt blocked: '${relativePath}'`);
+  const alias = resolved.split("/").find(isFileSystemAlias);
+  if (alias !== undefined) {
+    throw new PathError(`'${alias}' in '${relativePath}' is refused: it has the form of another name for a file `
+      + "(a Windows short name like 'AGENTS~1', or a ':' stream), which could reach a folder tools may not. "
+      + "Use the name as the vault shows it");
+  }
   // Without regard to letter case: on Windows and macOS '.Agents' is '.agents' (#135)
   for (const [folder, holds] of [...PROTECTED, ...extraProtected]) {
     if (within(resolved.toLowerCase(), folder.toLowerCase())) {
@@ -136,6 +142,18 @@ export function safeResolve(relativePath: string, scope: string[] | null = null)
     }
   }
   return resolved;
+}
+
+/**
+ * Whether a path segment could name a file other than the one it spells (#393): on Windows a long name has an 8.3
+ * short name (`.agents` is `AGENTS~1`, `.obsidian` `OBSIDI~1`), and `name:stream` or `name::$INDEX_ALLOCATION` opens
+ * a stream of a file or folder. Comparing such a segment with the protected folders' names proves nothing, so it is
+ * refused: a short name is at most six characters, `~` and a number (eight in all) with an extension of up to three.
+ */
+export function isFileSystemAlias(segment: string): boolean {
+  if (segment.includes(":")) return true;
+  const short = /^([^\s.~]{1,6}~[1-9]\d{0,5})(\.[^\s.]{1,3})?$/.exec(segment);
+  return short !== null && short[1].length <= 8;
 }
 
 /** "a/./b/../c" → "a/c"; "" for the vault root; null when it leaves the vault or is absolute. */

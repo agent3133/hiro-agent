@@ -9,10 +9,11 @@
 
 import { getAllTags, parseLinktext, TFile, type App, type TAbstractFile } from "obsidian";
 
-import { checkNoteName, noteFile, PathError, safeResolve, stem, within } from "../core/paths";
+import { checkNoteName, noteFile, PathError, safeResolve, stem } from "../core/paths";
 import { defineTool, type Tool } from "../core/tools/tool";
 import { notFound, resolveExistingNote, suggestNotes, type VaultPort } from "../core/vault";
 import { ensureFolder, HIDDEN_WINDOW_MOVE, noteWrite, recordChange, windowHidden, writeCount } from "./obsidianVault";
+import { Scope } from "../core/scope";
 
 /** How long Obsidian may need to index a note we just wrote — Python's INDEX_SETTLE_S. */
 const INDEX_SETTLE_MS = 400;
@@ -42,8 +43,8 @@ async function settle(): Promise<void> {
 }
 
 export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | null = null): Tool[] {
-  const scoped = scope && scope.length ? scope.map((s) => s.replace(/\/+$/, "")) : null;
-  const inScope = (path: string): boolean => !scoped || scoped.some((root) => within(path, root));
+  const limits = Scope.of(scope);
+  const inScope = (path: string): boolean => limits.contains(path);
   const notes = (): TFile[] => app.vault.getMarkdownFiles().filter((file) => inScope(file.path))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
@@ -230,7 +231,7 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
     const kind = attachment ? "attachment" : "note";
     const held = target instanceof TFile && !attachment ? await app.vault.read(target) : null;
     const record = (): void => {
-      if (!attachment) recordChange({ op: "delete", path: resolved, before: held, after: null });
+      if (!attachment) recordChange(vault, { op: "delete", path: resolved, before: held, after: null });
     };
     const noUndo = attachment ? `.${NOT_UNDONE}` : "";
     // No deleting for good past the user's choice (#322): it goes where Obsidian is set to put deleted files
@@ -373,8 +374,8 @@ export function makeIndexTools(app: App, vault: VaultPort, scope: string[] | nul
     const attachment = isAttachment(source);
     if (!attachment) {
       const moved = await vault.read(destination.resolved).catch(() => null);
-      recordChange({ op: "move", path: source, before: null, after: moved, movedTo: destination.resolved });
-      for (const note of rewritten) recordChange({ op: "modify", path: note.path, before: note.before, after: note.after });
+      recordChange(vault, { op: "move", path: source, before: null, after: moved, movedTo: destination.resolved });
+      for (const note of rewritten) recordChange(vault, { op: "modify", path: note.path, before: note.before, after: note.after });
     }
     return `Moved ${attachment ? "attachment" : "note"} from '${source}' to '${destination.resolved}'`
       + `${changed ? `; updated links in ${changed} note(s)` : ""}${attachment ? `.${NOT_UNDONE}; move it back to undo` : ""}`;

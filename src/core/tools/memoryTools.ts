@@ -61,19 +61,22 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Replace or add one section, then save — `update_profile_section`. Returns the new body. */
-export async function updateProfileSection(vault: VaultPort, profilePath: string, section: string, content: string,
-                                           maxProfileTokens?: number): Promise<string> {
+/**
+ * Replace or add one section, then save — `update_profile_section`. Returns the new body. Saved whole: the limit
+ * (`max_profile_tokens`) applies to what the agent reads, so a long profile is cut in the prompt and not in the
+ * file, where cutting lost the sections past the limit for good (#397).
+ */
+export async function updateProfileSection(vault: VaultPort, profilePath: string, section: string,
+                                           content: string): Promise<string> {
   const current = (await readUserProfile(vault, profilePath))
     || SECTIONS.map(([name, hint]) => `## ${name}\n\n_${hint}_\n`).join("\n");
   // "identity" is the Identity section, not a second one: matched without case, named as the profile names it (#164)
   const name = SECTIONS.find(([known]) => known.toLowerCase() === section.trim().toLowerCase())?.[0] ?? section;
   const pattern = new RegExp(`(## ${escapeRegExp(name)}\\s*\\n)([\\s\\S]*?)(?=\\n## |$(?![\\s\\S]))`, "i");
   const replacement = `## ${name}\n\n${content.trim()}\n`;
-  let updated = pattern.test(current)
+  const updated = pattern.test(current)
     ? current.replace(pattern, () => replacement)
     : `${current.trimEnd()}\n\n${replacement}`;
-  if (maxProfileTokens !== undefined) updated = truncateToTokens(updated, maxProfileTokens);
   await saveUserProfile(vault, profilePath, updated);
   return updated;
 }
@@ -82,7 +85,7 @@ export function makeMemoryTools(vault: VaultPort, settings: MemorySettings = DEF
   const updateUserMemory = defineTool("update_user_memory", async (args) => {
     const section = args.str("section");
     try {
-      await updateProfileSection(vault, settings.profilePath, section, args.str("content"), settings.maxProfileTokens);
+      await updateProfileSection(vault, settings.profilePath, section, args.str("content"));
       return `Updated '${section}' in user profile.`;
     } catch (error) {
       return `Failed to update user profile: ${error instanceof Error ? error.message : String(error)}`;

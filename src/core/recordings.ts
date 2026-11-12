@@ -15,8 +15,9 @@
  * (plugin/src/vault/media.ts in Obsidian, a stand-in in the tests).
  */
 
-import { basename, within } from "./paths";
+import { basename } from "./paths";
 import { vaultNotes, type VaultPort } from "./vault";
+import { Scope } from "./scope";
 
 export const MARKER = "obsidian-agent-transcript";
 export const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "ogg", "opus", "flac", "aac", "3gp"];
@@ -240,8 +241,8 @@ export async function recordingAnswer(vault: VaultPort, audioPath: string, media
     return `Error: '${name}' is an audio recording, but audio transcription is disabled. `
            + "Switch on Settings → Hiro Agent → Features → Audio transcription and set its model.";
   }
-  const roots = scope && scope.length ? scope.map((s) => s.replace(/\/+$/, "")) : null;
-  const canWrite = (note: string): boolean => !roots || roots.some((root) => within(note, root));
+  const limits = Scope.of(scope);
+  const canWrite = (note: string): boolean => limits.contains(note);
   let result: Awaited<ReturnType<typeof transcribeRecording>>;
   try {
     result = await transcribeRecording(vault, audioPath, media, canWrite);
@@ -249,7 +250,7 @@ export async function recordingAnswer(vault: VaultPort, audioPath: string, media
     if (error instanceof TranscriptionError) return `Error: could not transcribe '${name}': ${error.message}`;
     throw error;
   }
-  const where = result.notes.join(", ") || "not saved (outside vault_scope)";
+  const where = result.notes.join(", ") || "not saved (outside this agent's folders)";
   const details = [result.transcript.language, result.cached ? "from cache" : "new transcription"].filter(Boolean).join(", ");
   return `Transcript of '${name}' (${details}; saved in ${where}):\n${transcriptText(result.transcript) || "(no speech detected)"}`;
 }

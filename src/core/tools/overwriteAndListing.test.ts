@@ -54,7 +54,7 @@ describe("create_note replacing a note (#157)", () => {
   it("is refused where no one can be asked", async () => {
     const vault = await makeVault({ "Notes/Plan.md": "the old plan" });
     const { result } = await turn(vault, { path: "Notes/Plan.md", content: "x", overwrite: true });
-    expect(result).toContain("requires user confirmation");
+    expect(result).toContain("needs the user's confirmation");
     expect(await vault.read("Notes/Plan.md")).toBe("the old plan");
   });
 

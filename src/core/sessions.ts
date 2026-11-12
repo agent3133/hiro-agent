@@ -41,6 +41,20 @@ const CONNECTION_MARK = /<!-- session-connection: [^\n]*? -->/g;
 /** An answer's tool calls, before its text (#282); taken out again on load, so the model never sees them. */
 const TOOLS_START = "<!-- session-tools -->";
 const TOOLS_END = "<!-- /session-tools -->";
+/**
+ * The note's own markers in a message's text, made inert (#397). An answer that wrote `<!-- session-message: human -->`
+ * followed by text was read back as a message of the user's when the conversation reopened: an instruction that
+ * outlives the answer. Every `<!-- session` followed by backslashes and `-` gets one backslash more on save and one
+ * less on load, so any text comes back as it was, and none of it is taken for a marker.
+ */
+export function escapeMarkers(text: string): string {
+  return text.replace(/<!--(\s*)session(\\*)-/g, "<!--$1session$2\\-");
+}
+
+export function unescapeMarkers(text: string): string {
+  return text.replace(/<!--(\s*)session(\\*)\\-/g, "<!--$1session$2-");
+}
+
 /** How much of a call's result the note keeps: enough to see what came back, not a copy of what was read. */
 const SAVED_RESULT_CHARS = 500;
 const SAVED_ARGS_CHARS = 300;
@@ -77,8 +91,8 @@ export function savedCall(name: string, input: unknown, result: string, error: b
 /** An answer's calls as folded callouts, one per call, between the tools marks. */
 function renderCalls(calls: SavedCall[]): string {
   const callouts = calls.map((call) => {
-    const head = `> [!tool]- ${call.name} ${call.args}${call.error ? " — failed" : ""}`;
-    const body = call.result.split("\n").map((line) => (line ? `> ${line}` : ">"));
+    const head = `> [!tool]- ${call.name} ${escapeMarkers(call.args)}${call.error ? " — failed" : ""}`;
+    const body = escapeMarkers(call.result).split("\n").map((line) => (line ? `> ${line}` : ">"));
     return [head, ...body].join("\n");
   });
   return `${TOOLS_START}\n${callouts.join("\n\n")}\n${TOOLS_END}`;
@@ -91,8 +105,8 @@ function parseCalls(block: string): SavedCall[] {
     const lines = callout.trim().split("\n");
     const head = /^> \[!tool\]- (\S+) (.*?)( — failed)?$/.exec(lines[0] ?? "");
     if (!head) continue;
-    calls.push({ name: head[1], args: head[2], error: Boolean(head[3]),
-                 result: lines.slice(1).map((line) => line.replace(/^> ?/, "")).join("\n") });
+    calls.push({ name: head[1], args: unescapeMarkers(head[2]), error: Boolean(head[3]),
+                 result: unescapeMarkers(lines.slice(1).map((line) => line.replace(/^> ?/, "")).join("\n")) });
   }
   return calls;
 }
@@ -195,7 +209,8 @@ function summaryOf(text: string): string | null {
 /** A message's text as the note keeps it: an answer with its tool calls first, secrets redacted in both. */
 function withCalls(message: SessionMessage, calls?: CallsByAnswer): string {
   const saved = message.role === "assistant" ? calls?.get(message) : undefined;
-  const text = saved?.length ? `${renderCalls(saved)}\n\n${message.content}` : message.content;
+  const content = escapeMarkers(message.content);
+  const text = saved?.length ? `${renderCalls(saved)}\n\n${content}` : content;
   return redactSecrets(text);
 }
 
@@ -281,7 +296,7 @@ export async function loadSessionWithCalls(vault: VaultPort, name: string, token
   const summaryMatch = new RegExp(`${escape(SUMMARY_START)}\\n([\\s\\S]*?)\\n${escape(SUMMARY_END)}`).exec(text);
   let summary: string | null = null;
   if (summaryMatch) {
-    summary = summaryMatch[1].trim();
+    summary = unescapeMarkers(summaryMatch[1].trim());
     text = text.slice(0, summaryMatch.index) + text.slice(summaryMatch.index + summaryMatch[0].length);
   }
   text = text.replace(CONNECTION_MARK, "");
@@ -291,10 +306,10 @@ export async function loadSessionWithCalls(vault: VaultPort, name: string, token
     if (pieces[i] !== HUMAN && pieces[i] !== ASSISTANT) continue;
     const text = (pieces[i + 1] ?? "").trim();
     if (pieces[i] === HUMAN) {
-      messages.push({ role: "user", content: text });
+      messages.push({ role: "user", content: unescapeMarkers(text) });
     } else {
       const { content, calls: saved } = splitCalls(text);
-      const message: SessionMessage = { role: "assistant", content };
+      const message: SessionMessage = { role: "assistant", content: unescapeMarkers(content) };
       messages.push(message);
       if (saved.length) calls.set(message, saved);
     }
@@ -388,10 +403,10 @@ export async function compactSession(vault: VaultPort, name: string, summarize: 
   };
   if (typeof meta.title === "string" && meta.title) frontmatter.title = meta.title;
   if (Array.isArray(meta.connections) && meta.connections.length) frontmatter.connections = meta.connections;
-  const parts = [`---\n${dumpYaml(frontmatter)}---\n`, `\n${SUMMARY_START}\n${summary}\n${SUMMARY_END}\n`];
+  const parts = [`---\n${dumpYaml(frontmatter)}---\n`, `\n${SUMMARY_START}\n${escapeMarkers(summary)}\n${SUMMARY_END}\n`];
   // The exchanges kept word for word keep their tool calls too (#282)
   for (const [human, assistant] of recent) {
-    parts.push(`\n${HUMAN}\n${human.content}\n`, `\n${ASSISTANT}\n${withCalls(assistant, loaded.calls)}\n`);
+    parts.push(`\n${HUMAN}\n${escapeMarkers(human.content)}\n`, `\n${ASSISTANT}\n${withCalls(assistant, loaded.calls)}\n`);
   }
   await vault.write(path, parts.join(""));
   return old.length;

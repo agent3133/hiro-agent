@@ -77,8 +77,9 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
 
 1. Open the chat from the ribbon (the bot icon), or run **Hiro Agent: Open the chat**.
 2. Set up a connection. The chat offers it on the first start: a server on this computer's usual ports
-   (llama.cpp 8080, Ollama 11434, LM Studio 1234, vLLM 8000) is found and added with one click; any OpenAI-compatible API takes a URL, a model and a key under Settings →
-   Hiro Agent → Connections → Add connection.
+   (llama.cpp 8080, Ollama 11434, LM Studio 1234, vLLM 8000) is found and added with one click. For any
+   OpenAI-compatible API, **Use an API key** opens the form for its URL, model and key (also under Settings →
+   Hiro Agent → Connections → Add connection).
 3. Ask it something about your vault. It streams its answer, shows each tool call as it makes it, and asks first
    before deleting, moving or overwriting a note.
 
@@ -93,7 +94,8 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
   like any other note.
 - **Folder restrictions enforced by the tools**, not just requested in a prompt: a restricted agent's tools refuse
   everything outside its folders, and the agent is told so.
-- **Conversations kept as notes** — several chats at once, each conversation renamed as you like and listed newest
+- **Conversations kept as notes** — in the plugin's `.sessions/` folder, with *Export as note* for a copy among your
+  own notes; several chats at once, each conversation renamed as you like, found by its title and listed newest
   first, optionally with the tool calls of each answer so you can check later what the agent did — and an undo
   button for anything an answer changed, which shows the diff first.
 - **Attachments** — images, PDFs (as text, or page by page when scanned), Word, Excel, PowerPoint and OpenDocument
@@ -104,7 +106,7 @@ macOS, a program installed with Homebrew is found by its name; a full path alway
 - **Bases** — the agent runs a Base and reads its rows as Obsidian computes them: a `.base` file, a Base embedded in
   a note, or one it writes for the question. Needs the Bases core plugin.
 - **Web pages** — the agent can open a page. Off until you switch it on, and marked as sending data off your
-  machine. Web search comes from an MCP server of your choice.
+  machine; each site asks once per conversation. Web search comes from an MCP server of your choice.
 - **MCP servers** — tools from other programs on your computer or from HTTP services, if you want to extend what
   the agent can reach.
 - **Commands and a CLI** — ask an agent about the open note or the selection from the command palette, or run the
@@ -115,7 +117,7 @@ The tools, grouped as the Agents page shows them — each agent gets only the on
 | Group | Tools |
 |---|---|
 | Read notes | `read_note`, `read_notes`, `list_notes`, `find_notes`, `search_vault`, `list_tags`, `note_outline`, `get_backlinks`, `get_outlinks`, `get_metadata`, `find_broken_links`, `list_attachments`, `read_attachment` |
-| Write notes | `create_note`, `edit_note`, `append_to_note`, `update_note`, `update_metadata`, `create_from_template` |
+| Write notes | `create_note`, `edit_note`, `append_to_note`, `update_note`, `update_metadata`, `create_from_template`, `import_attachment` |
 | Delete and move | `delete_note`, `move_note` |
 | Tasks | `list_tasks`, `list_tasknotes`, `create_tasknote`, `complete_tasknote` |
 | Obsidian | `daily_note`, `list_templates`, `open_in_obsidian`, `query_base` |
@@ -133,13 +135,17 @@ Everything in detail: **[the guide](docs/guide.md)**.
 - **Keys live only in Obsidian's keychain** (Settings → Keychain). A connection's key is picked from there, a setting
   names it (`${openai-api-key}`), a key typed into a settings field is refused, and none is ever written to the
   plugin's saved settings.
-- **Settings that sync cannot redirect a key or run a program on another device.** A connection's key goes only to
-  the address you approved on this device, an MCP server that receives a key needs approving here too, and the
-  audio programs run only once approved here. A change made on this device approves itself; one that arrives by
+- **Settings that sync cannot redirect a key, your notes or a program on another device.** A connection sends its
+  key, and your messages, only to an address you approved on this device — any address but this computer's, key or
+  not; an MCP server that receives a key or runs on another computer needs approving here too, and the audio
+  programs run only once approved here. A change made on this device approves itself; one that arrives by
   sync waits for **Approve** in the settings. The *Developer* switch is kept on this device only.
 - **Nothing leaves your machine except what you configure:** the model connection you chose, web pages when you
   switched them on, and HTTP MCP servers you added. No telemetry. An image from the web in an answer is
-  shown as a link and not loaded, so an answer cannot send anything out by itself.
+  shown as a link and not loaded, and another plugin's code in an answer (a `dataviewjs` block, say) is shown as
+  code and not run. When the agent writes something into a note that would load from the web or run another
+  plugin's code once the note is shown, it asks first and says what. *Insert into note* turns images from the web
+  into links.
 - **Programs outside Obsidian** run only as you configure them: whisper.cpp and ffmpeg for recordings, and MCP
   servers you add — a program-based (stdio) MCP server starts only after you approve its exact command line on
   that device, and the audio programs, when set to anything but the plain `whisper-cli` and `ffmpeg`, likewise. Apart from those — and a temporary folder the audio programs work in — the plugin reads and writes
@@ -176,9 +182,11 @@ Kept current during the beta; a limitation listed here does not need reporting a
   on, the answers' tool calls. An older version of the plugin shows those calls as text in the answer.
 - OpenAI's Responses API, which a connection to OpenAI now uses, has been tried with gpt-6.1-sol only. If another
   OpenAI model misbehaves, set *API* to *chat completions* under the connection's *More for …* and report it.
-- Undo and going back to an earlier message remember what answers changed only while Obsidian runs: after a restart
-  or a reload of the plugin, going back still removes the messages, but what those answers changed in the vault
-  stays, and the dialog says so.
+- Undo keeps the last 20 answers across a restart (the command *Undo an earlier answer*, or `agent:undo`), but going
+  back to an earlier message in a reopened conversation does not know which answers changed what: it removes the
+  messages, what those answers changed in the vault stays, and the dialog says so. Undo them first with the command.
+- The agent cannot reach a note or folder whose name looks like a Windows short name (`Plan~1.md`) or contains a `:`, on
+  any system: such names can point at other files on Windows. Rename it to let the agent use it.
 
 ## Feedback and issues
 

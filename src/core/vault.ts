@@ -8,7 +8,9 @@
  */
 
 import { getCloseMatches, ratio } from "./difflib";
-import { basename, fold, hasSuffix, normalize, PathError, safeResolve, stem } from "./paths";
+import type { Change } from "./journal";
+import { basename, fold, hasSuffix, PathError, safeResolve, stem } from "./paths";
+import { Scope } from "./scope";
 
 export interface VaultPort {
   /** Every file, including files in dot folders (callers decide what to skip). Sorted. */
@@ -39,6 +41,11 @@ export interface VaultPort {
   modified?(path: string): Promise<number>;
   /** A file's size in bytes, for the attachment listing (#235). */
   size?(path: string): Promise<number>;
+  /**
+   * Report a change a tool made around the port (a trash or rename through Obsidian) to the undo journal turn this
+   * port's writes go to (#206); absent when they go to none.
+   */
+  record?(change: Change): void;
 }
 
 /**
@@ -79,7 +86,10 @@ export async function vaultNotes(vault: VaultPort, scope: string[] | null = null
 /** Every file *wanted* takes, in the vault (or in *scope*), skipping dot folders such as .trash. */
 export async function vaultFiles(vault: VaultPort, scope: string[] | null,
                                  wanted: (file: string) => boolean): Promise<string[]> {
-  const roots = scope && scope.length ? scope.map((s) => normalize(s.replace(/\/+$/, "")) ?? "") : [""];
+  // The whole vault is the root ""; a restriction is its folders — and one whose folders all name the vault itself
+  // or leave it allows nothing (#419: it read as the whole vault before)
+  const limits = Scope.of(scope);
+  const roots = limits.restricted ? limits.roots() : [""];
   const files = await vault.files();
   const found: string[] = [];
   for (const root of roots) {
@@ -124,10 +134,8 @@ export async function suggestFolders(vault: VaultPort, wanted: string, scope: st
                                      limit = 3): Promise<string[]> {
   const wantedClean = fold(stripQuotes(wanted.replace(/\\/g, "/").trim()).replace(/^\/+|\/+$/g, ""));
   let folders = (await vault.folders()).filter((f) => !f.split("/").some((part) => part.startsWith(".")));
-  if (scope && scope.length) {
-    const roots = scope.map((s) => s.replace(/\/+$/, ""));
-    folders = folders.filter((f) => roots.some((s) => f === s || f.startsWith(`${s}/`)));
-  }
+  const limits = Scope.of(scope);
+  folders = folders.filter((f) => limits.contains(f));
   if (!wantedClean) return [...folders].sort().slice(0, limit);
   const close = folders.filter((f) => fold(f).includes(wantedClean) || wantedClean.includes(fold(f)));
   for (const f of getCloseMatches(wantedClean, folders.map(fold), limit, 0.6)) {

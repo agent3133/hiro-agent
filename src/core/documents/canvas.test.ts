@@ -81,3 +81,67 @@ describe("read_note canvas rejection", () => {
     expect(result).toBe("Error: 'Board.canvas' is a canvas, not a note; read it with read_attachment");
   });
 });
+
+describe("canvas JSON that is not a canvas (#385)", () => {
+  it("null JSON returns the not-a-canvas error", () => {
+    const result = canvasToMarkdown("c.canvas", "null");
+    expect(result).toBe("Error: 'c.canvas' is not a readable canvas (its JSON holds no list of cards)");
+  });
+
+  it("a canvas JSON with an empty node list and an object of edges returns the not-a-canvas error", () => {
+    const result = canvasToMarkdown("c.canvas", JSON.stringify({ nodes: [], edges: {} }));
+    expect(result).toBe("Error: 'c.canvas' is not a readable canvas (its JSON holds no list of cards)");
+  });
+
+  it("nodes that are not a list return the not-a-canvas error", () => {
+    const result = canvasToMarkdown("c.canvas", JSON.stringify({ nodes: { a: 1 } }));
+    expect(result).toBe("Error: 'c.canvas' is not a readable canvas (its JSON holds no list of cards)");
+  });
+
+  it("a top-level list returns the not-a-canvas error", () => {
+    const result = canvasToMarkdown("c.canvas", "[]");
+    expect(result).toBe("Error: 'c.canvas' is not a readable canvas (its JSON holds no list of cards)");
+  });
+
+  it("a node without coordinates counts as at 0,0", () => {
+    const canvas = JSON.stringify({
+      nodes: [
+        // Listed second, so the order comes from the coordinates and not from the list
+        { id: "a", type: "text", text: "A", x: 10, y: 10, width: 5, height: 5 },
+        { id: "c", type: "text", text: "C", x: 20, y: 20, width: 5, height: 5 },
+        { id: "b", type: "text", text: "B" },
+      ],
+      edges: [],
+    });
+    const result = canvasToMarkdown("c.canvas", canvas);
+    const lines = result.split("\n");
+    expect(lines).toContain("1. text: B");
+    expect(lines).toContain("2. text: A");
+    expect(lines).toContain("3. text: C");
+  });
+
+  it("a null node is skipped and the count reflects the rest", () => {
+    const canvas = JSON.stringify({
+      nodes: [
+        null,
+        { id: "a", type: "text", text: "A", x: 0, y: 0, width: 5, height: 5 },
+      ],
+      edges: [],
+    });
+    const result = canvasToMarkdown("c.canvas", canvas);
+    expect(result.startsWith("Canvas 'c.canvas' — 1 card")).toBe(true);
+    expect(result).toContain("1. text: A");
+  });
+
+  it("a node list with a null entry and one valid node reports one card", () => {
+    const canvas = JSON.stringify({
+      nodes: [
+        null,
+        { id: "a", type: "text", text: "A", x: 0, y: 0, width: 5, height: 5 },
+      ],
+      edges: [],
+    });
+    const result = canvasToMarkdown("c.canvas", canvas);
+    expect(result.startsWith("Canvas 'c.canvas' — 1 card")).toBe(true);
+  });
+});

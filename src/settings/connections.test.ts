@@ -2,8 +2,8 @@
 import { describe, expect, it } from "vitest";
 
 import { hasConnection, resolveConnection } from "../config/connections";
-import { addLocalServer, describeConnection, draftChange, draftOf, draftProblem, findLocalServers, modelsUrl, testVerdict,
-  type ProbeAnswer } from "./connections";
+import { addLocalServer, clearTextKeyWarning, describeConnection, draftChange, draftOf, draftProblem, findLocalServers, isLoopbackHost, modelsUrl,
+  testVerdict, type ProbeAnswer } from "./connections";
 import { connectionApproval } from "../config/deviceApprovals";
 
 /** A probe where only *answering* URLs answer, with a llama.cpp /v1/models body naming *model*. */
@@ -157,5 +157,30 @@ describe("the connection form (#149)", () => {
 
   it("needs no approval for a key that has no address to go to", () => {
     expect(connectionApproval({ llm_profiles: { l: { provider: "llamacpp", api_key: "${k}" } } }, "l")).toBeNull();
+  });
+});
+
+describe("clearTextKeyWarning (#408)", () => {
+  it("warns when the key goes to a real host over plain http", () => {
+    const warning = clearTextKeyWarning({ baseUrl: "http://example.com/v1", key: "openai" });
+    expect(warning).toContain("example.com");
+  });
+
+  it("says nothing for loopback hosts", () => {
+    for (const baseUrl of ["http://127.0.0.1:8080", "http://localhost:11434", "http://[::1]:8080"]) {
+      expect(clearTextKeyWarning({ baseUrl, key: "k" })).toBeNull();
+    }
+  });
+
+  it("says nothing for https, and for a key that is empty", () => {
+    expect(clearTextKeyWarning({ baseUrl: "https://example.com/v1", key: "k" })).toBeNull();
+    expect(clearTextKeyWarning({ baseUrl: "http://example.com/v1", key: "" })).toBeNull();
+  });
+});
+
+describe("isLoopbackHost (#408)", () => {
+  it("is true for loopback addresses and false for anything else", () => {
+    for (const host of ["127.0.0.5", "LOCALHOST", "[::1]"]) expect(isLoopbackHost(host)).toBe(true);
+    for (const host of ["192.168.1.10", "127.example.com"]) expect(isLoopbackHost(host)).toBe(false);
   });
 });

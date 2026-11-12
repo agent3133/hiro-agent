@@ -6,7 +6,7 @@ import obsidianmd from "eslint-plugin-obsidianmd";
 export default defineConfig([
   // The plugin's code: tests, the smoke suites and the build scripts are not what the review reads
   { ignores: ["main.js", "node_modules/**", "tests/**", "scripts/**", "src/**/*.test.ts", "src/**/testing/**",
-              "*.mjs"] },
+              "*.mjs", "coverage/**"] },
   ...obsidianmd.configs.recommended,
   {
     languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname } },

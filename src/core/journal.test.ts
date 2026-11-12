@@ -105,4 +105,158 @@ describe("test_turn_journal.py", () => {
 
     expect(book.turns().map((turn) => turn.prompt)).toEqual(["turn 2", "turn 3"]);
   });
+
+  describe("several open turns (#206)", () => {
+    it("1: two turns begun one after the other keep their changes apart", () => {
+      const journal = new Journal();
+      const a = journal.begin("turn a");
+      const b = journal.begin("turn b");
+      journal.record({ op: "create", path: "a.md", before: null, after: "A" }, a);
+      journal.record({ op: "create", path: "b.md", before: null, after: "B" }, b);
+      const turnA = journal.finish(a)!;
+      const turnB = journal.finish(b)!;
+      expect(turnA.changes.map((c) => c.path)).toEqual(["a.md"]);
+      expect(turnB.changes.map((c) => c.path)).toEqual(["b.md"]);
+    });
+
+    it("2: beginning a second turn does not close the first", () => {
+      const journal = new Journal();
+      const firstId = journal.begin("first");
+      journal.begin("second");
+      journal.record({ op: "create", path: "first.md", before: null, after: "First" }, firstId);
+      const turn = journal.finish(firstId)!;
+      expect(turn.changes.map((c) => c.path)).toEqual(["first.md"]);
+    });
+
+    it("3: record and finish without an id go to the turn begun last", () => {
+      const journal = new Journal();
+      journal.begin("first");
+      journal.begin("second");
+      journal.record({ op: "create", path: "last.md", before: null, after: "Last" });
+      const turn = journal.finish()!;
+      expect(turn.changes.map((c) => c.path)).toEqual(["last.md"]);
+    });
+
+    it("4: finish(id) of an already finished turn returns null, and turns() holds it only once", () => {
+      const journal = new Journal();
+      const id = journal.begin("once");
+      journal.record({ op: "create", path: "x.md", before: null, after: "X" });
+      journal.finish(id);
+      const again = journal.finish(id);
+      expect(again).toBeNull();
+      expect(journal.turns().length).toBe(1);
+    });
+
+    it("5: a change recorded with an id while undoing another turn is still kept", async () => {
+      const journal = new Journal();
+      const xId = journal.begin("turn X");
+      journal.record({ op: "create", path: "x.md", before: null, after: "X" }, xId);
+      journal.finish(xId);
+
+      const yId = journal.begin("turn Y");
+
+      const vault = {
+        isFile: async (path: string) => path === "x.md",
+        read: async (path: string) => {
+          if (path === "x.md") return "X";
+          return "";
+        },
+        remove: async (path: string) => {
+          if (path === "x.md") {
+            journal.record({ op: "create", path: "y.md", before: null, after: "Y" }, yId);
+          }
+        },
+      } as unknown as Parameters<Journal["undo"]>[1];
+
+      const turnX = journal.find(xId)!;
+      await journal.undo(turnX, vault);
+
+      const turnY = journal.finish(yId)!;
+      expect(turnY.changes.map((c) => c.path)).toContain("y.md");
+    });
+
+    it("undoes, from a journal saved and read back after a restart, what the turn changed (#410)", async () => {
+      const { book, tool, vault } = await booked({ "Existing.md": "first line\n" });
+
+      book.begin("write some notes");
+      await tool("create_note").run({ path: "One.md", content: "one\n" });
+      await tool("append_to_note").run({ path: "Existing.md", text: "second line" });
+      book.finish();
+
+      // A new journal, as after a restart, from what was saved
+      const restarted = new Journal();
+      restarted.restore(JSON.parse(JSON.stringify(book.saved())));
+      expect(restarted.turns()).toHaveLength(1);
+
+      const result = await restarted.undo(restarted.turns()[0], vault.vault);
+
+      expect(result.restored.length > 0 && result.refused.length === 0).toBe(true);
+      expect(await vault.exists("One.md")).toBe(false);
+      expect(await vault.read("Existing.md")).toBe("first line\n");
+    });
+
+    it("still refuses, after a restart, a note changed since the agent wrote it (#410)", async () => {
+      const { book, tool, vault } = await booked({ "Mine.md": "original\n" });
+
+      book.begin("edit two notes");
+      await tool("update_note").run({ path: "Mine.md", content: "the agent's version\n" });
+      book.finish();
+
+      await vault.vault.write("Mine.md", "and then I edited it myself\n");
+
+      const restarted = new Journal();
+      restarted.restore(JSON.parse(JSON.stringify(book.saved())));
+
+      const result = await restarted.undo(restarted.turns()[0], vault.vault);
+
+      expect(result.refused.map((r) => r.path)).toEqual(["Mine.md"]);
+      expect(result.refused[0].reason).toContain("changed after the agent wrote it");
+      expect(await vault.read("Mine.md")).toBe("and then I edited it myself\n");
+    });
+
+    it("keeps only the newest saved turns within the journal's limit (#410)", async () => {
+      const { book, tool } = await booked({}, 20);
+
+      for (let index = 0; index < 3; index++) {
+        book.begin(`turn ${index}`);
+        await tool("create_note").run({ path: `${index}.md`, content: "x" });
+        book.finish();
+      }
+
+      const saved = book.saved();
+      const newBook = new Journal(2);
+      newBook.restore(saved);
+
+      expect(newBook.turns().map((t) => t.id)).toEqual([saved.turns[1].id, saved.turns[2].id]);
+    });
+
+    it("reads nothing from a damaged or unknown saved journal (#410)", async () => {
+      const { book } = await booked({});
+
+      book.restore(null);
+      expect(book.turns()).toEqual([]);
+
+      book.restore({ version: 2, turns: [] });
+      expect(book.turns()).toEqual([]);
+
+      book.restore({ version: 1, turns: [{ id: "x", changes: [{ op: "bogus", path: "a" }] }] });
+      expect(book.turns()).toEqual([]);
+    });
+
+    it("puts the saved turns before the ones answered since the start, which stay the newest (#410)", async () => {
+      const before = await booked({});
+      const aId = before.book.begin("turn A");
+      await before.tool("create_note").run({ path: "a.md", content: "A" });
+      before.book.finish(aId);
+
+      // After the restart: turn B is answered before the saved journal is read
+      const after = await booked({});
+      const bId = after.book.begin("turn B");
+      await after.tool("create_note").run({ path: "b.md", content: "B" });
+      after.book.finish(bId);
+      after.book.restore(JSON.parse(JSON.stringify(before.book.saved())));
+
+      expect(after.book.turns().map((t) => t.id)).toEqual([aId, bId]);
+    });
+  });
 });

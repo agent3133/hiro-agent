@@ -19,6 +19,20 @@ describe("protected folders (F1, F10)", () => {
     expect(() => safeResolve(path)).toThrow(PathError);
   });
 
+  // Other names for the same files on Windows: 8.3 short names and NTFS streams (#393)
+  it.each([
+    "AGENTS~1/a.md", "agents~1/a.md", "SESSIO~1/x.md", "OBSIDI~1/app.json", "MEMORY~1/user-profile.md",
+    "Projects/PERSON~1/profile.md", "PROGR~12.TXT", ".obsidian::$INDEX_ALLOCATION/app.json", "note.md:stream",
+    "Notes/x.md::$DATA",
+  ])("refuse %s, another name for a file (#393)", (path) => {
+    expect(() => safeResolve(path)).toThrow("has the form of another name for a file");
+  });
+
+  it.each(["Plan ~ draft.md", "v~2 ideas.md", "Long name~1.md", "a~b.md", "~1.md", "Notes/x~0.md", "ABCDEFG~1.md", "PROGRA~12.TXT"])(
+    "leave %s alone: not a short name's form (#393)", (path) => {
+      expect(safeResolve(path)).toBe(path);
+    });
+
   it("say what the folder holds, named as it is", () => {
     expect(() => safeResolve(".Agents/assistant.md")).toThrow("'.agents' holds agent definitions and is not reachable by tools");
   });

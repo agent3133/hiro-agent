@@ -1,7 +1,7 @@
 // Ported from tests/test_list_notes_limit.py — the three list_notes limit tests.
 import { describe, expect, it } from "vitest";
 
-import { LIST_LIMIT } from "./vaultTools";
+import { LIST_LIMIT } from "./listingTools";
 import { makeVault } from "../testing/vault";
 
 describe("test_list_notes_limit.py", () => {

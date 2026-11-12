@@ -17,7 +17,9 @@ import {
   addLocalServer, describeConnection, draftChange, draftOf, getVia, modelIds, modelsUrl, serverLabel, testVerdict,
   type ConnectionDraft, type LocalServer, type ProbeAnswer, type Profiles,
 } from "./connections";
+import { messageOf } from "../core/errors";
 import { detectServer } from "../config/servers";
+import { AskModal } from "../view/AskModal";
 import { buildSection, profileSchema, type ConfigField } from "./schemaForm";
 
 export interface ProfilesHost extends ConfigHost {
@@ -157,12 +159,29 @@ function connectionRow(row: Setting, name: string, values: Record<string, unknow
   }));
   row.addExtraButton((button) => button.setIcon("pencil").setTooltip(`Edit ${name}`)
     .onClick(() => openForm(host, draft, names.filter((other) => other !== name), name, fallback)));
-  row.addExtraButton((button) => button.setIcon("trash-2").setTooltip(`Remove ${name}`).onClick(async () => {
-    // A default that names a removed connection would leave turns with nowhere to go, so it goes too
-    const change: Record<string, unknown> = { llm_profiles: { [name]: null } };
-    if (name === fallback) change.default_llm_profile = null;
-    await apply(host, change);
+  row.addExtraButton((button) => button.setIcon("trash-2").setTooltip(`Remove ${name}`).onClick(() => {
+    new AskModal(host.app, {
+      title: `Remove ${name}?`,
+      body: "The connection is removed from the settings. Agents and chats that use it need another one.",
+      confirm: "Remove",
+    }, (yes) => {
+      if (!yes) return;
+      // A default that names a removed connection would leave turns with nowhere to go, so it goes too
+      const change: Record<string, unknown> = { llm_profiles: { [name]: null } };
+      if (name === fallback) change.default_llm_profile = null;
+      apply(host, change).catch((error: unknown) => new Notice(messageOf(error), 10_000));
+    }).open();
   }));
+}
+
+/**
+ * The form to add a connection, opened from outside the settings: the chat's first-run card, for a cloud key (#400).
+ * The same form, and the same save, as *Add connection* on the Connections page.
+ */
+export function openNewConnection(doc: ConfigDocument, host: ProfilesHost): void {
+  const names = Object.keys(doc.values.llm_profiles ?? {});
+  const fallback = typeof doc.values.default_llm_profile === "string" ? doc.values.default_llm_profile : "";
+  openForm(host, { name: names.length ? "" : "cloud", baseUrl: "", model: "", key: "" }, names, null, fallback);
 }
 
 /** The form, to add a connection (*previous* null) or change one. */

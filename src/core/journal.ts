@@ -4,8 +4,8 @@
  * agent left; a diff renders a turn, and undo restores exactly those files — refusing any file that changed since,
  * because the agent's "before" is no longer what the user would get back.
  *
- * It holds the last few turns of one run; it is not version control, and what it does not see (edits made in
- * Obsidian itself) it does not pretend to cover.
+ * It holds the last few turns, saved on this device so a restart keeps them (#410, `saved` and `restore`); it is not
+ * version control, and what it does not see (edits made in Obsidian itself) it does not pretend to cover.
  */
 
 import { linesKeepEnds, unifiedDiff } from "./difflib";
@@ -44,37 +44,106 @@ export interface UndoResult {
 
 const size = (change: Change): number => (change.before?.length ?? 0) + (change.after?.length ?? 0);
 
+/** The kept turns as saved on this device (#410): what `Journal.saved` gives and `Journal.restore` takes. */
+export interface SavedJournal {
+  version: 1;
+  turns: { id: string; prompt: string; started: string; changes: Change[]; undone: boolean }[];
+}
+
+const OPS: Op[] = ["create", "modify", "delete", "move"];
+
+/** A saved change as it was written, or null for anything else: the file is read back, and may be damaged. */
+function savedChange(raw: unknown): Change | null {
+  const change = raw as Record<string, unknown> | null;
+  if (!change || !OPS.includes(change.op as Op) || typeof change.path !== "string") return null;
+  const text = (value: unknown): string | null | undefined => (value === null || typeof value === "string" ? value : undefined);
+  const before = text(change.before);
+  const after = text(change.after);
+  if (before === undefined || after === undefined) return null;
+  return {
+    op: change.op as Op, path: change.path, before, after,
+    ...(typeof change.movedTo === "string" ? { movedTo: change.movedTo } : {}),
+    ...(typeof change.binarySize === "number" ? { binarySize: change.binarySize } : {}),
+  };
+}
+
 export class Journal {
   private turnsKept: Turn[] = [];
-  private open: Turn | null = null;
+  /** The turns open now, in the order they began: one per answer running (#206). */
+  private open: Turn[] = [];
   /** set while undo writes, so an undo is not itself journalled */
   private replaying = false;
 
   constructor(private readonly maxTurns = 20, private readonly maxBytes = 20_000_000) {}
 
-  /** Open a turn; one still open is closed first — a turn ends when the next one starts. */
+  /**
+   * Open a turn and give its id. Answers that run side by side (#206) each have their own, and say which with
+   * `record` and `finish`; without an id, those go to the turn begun last.
+   */
   begin(prompt = ""): string {
-    this.finish();
     const id = Math.random().toString(16).slice(2, 14).padEnd(12, "0");
-    this.open = { id, prompt, started: new Date(), changes: [], undone: false };
+    this.open.push({ id, prompt, started: new Date(), changes: [], undone: false });
     return id;
   }
 
-  /** Close the open turn, and keep it if it changed anything. */
-  finish(): Turn | null {
-    const turn = this.open;
-    this.open = null;
-    if (!turn || !turn.changes.length) return null;
+  /** The open turn *id*, or without one the turn begun last. */
+  private opened(id?: string): Turn | null {
+    if (id === undefined) return this.open[this.open.length - 1] ?? null;
+    return this.open.find((turn) => turn.id === id) ?? null;
+  }
+
+  /** Close the open turn *id* (the one begun last without an id), and keep it if it changed anything. */
+  finish(id?: string): Turn | null {
+    const turn = this.opened(id);
+    if (!turn) return null;
+    this.open = this.open.filter((other) => other !== turn);
+    if (!turn.changes.length) return null;
     this.turnsKept.push(turn);
-    while (this.turnsKept.length > this.maxTurns
-           || (this.turnsKept.length > 1 && this.totalSize() > this.maxBytes)) this.turnsKept.shift();
+    this.trim();
     return turn;
   }
 
-  /** Called for every write, move and delete while a turn is open. */
-  record(change: Change): void {
-    if (!this.open || this.replaying) return;
-    this.open.changes.push(change);
+  /**
+   * Called for every write, move and delete while a turn is open: into turn *id*, or without one the turn begun
+   * last. A change named for its turn is always the answer's own, so an undo running meanwhile does not drop it.
+   */
+  record(change: Change, id?: string): void {
+    if (id === undefined && this.replaying) return;
+    this.opened(id)?.changes.push(change);
+  }
+
+  /** The kept turns, for saving on this device (#410). Open turns are not kept: an answer still running owns them. */
+  saved(): SavedJournal {
+    return { version: 1, turns: this.turnsKept.map((turn) => ({ ...turn, started: turn.started.toISOString() })) };
+  }
+
+  /**
+   * Take the turns saved before a restart (#410), within this journal's limits: the oldest go first. Anything that
+   * does not read as a saved journal is left out, so a damaged file loses undo, not the plugin. Turns kept already
+   * — answered since the start — stay the newest.
+   */
+  restore(data: unknown): void {
+    const raw = (data as { version?: unknown; turns?: unknown } | null);
+    if (!raw || raw.version !== 1 || !Array.isArray(raw.turns)) return;
+    const loaded: Turn[] = [];
+    for (const item of raw.turns as Record<string, unknown>[]) {
+      if (!item || typeof item.id !== "string" || !Array.isArray(item.changes)) continue;
+      const changes = item.changes.map(savedChange);
+      if (!changes.length || changes.some((change) => change === null)) continue;
+      const started = new Date(typeof item.started === "string" ? item.started : 0);
+      loaded.push({ id: item.id, prompt: typeof item.prompt === "string" ? item.prompt : "",
+                    started: Number.isNaN(started.getTime()) ? new Date(0) : started,
+                    changes: changes as Change[], undone: item.undone === true });
+    }
+    const known = new Set(this.turnsKept.map((turn) => turn.id));
+    this.turnsKept = [...loaded.filter((turn) => !known.has(turn.id)), ...this.turnsKept];
+    this.trim();
+  }
+
+  /** The oldest turns go while there are too many, or they hold too much text — the newest always stays. */
+  private trim(): void {
+    while (this.turnsKept.length > this.maxTurns
+           || (this.turnsKept.length > 1 && this.totalSize() > this.maxBytes)) this.turnsKept.shift();
   }
 
   totalSize(): number {

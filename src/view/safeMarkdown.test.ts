@@ -1,7 +1,7 @@
 // Model output renders without fetching anything from the network (#137).
 import { describe, expect, it } from "vitest";
 
-import { isRemote, withoutRemoteMedia } from "./safeMarkdown";
+import { isRemote, withoutPluginCode, withoutRemoteMedia } from "./safeMarkdown";
 
 describe("isRemote", () => {
   it.each(["https://a.example/x.png", "http://a.example", "//a.example/x", "<https://a.example/x>", "ftp://a/x",
@@ -66,4 +66,41 @@ describe("withoutRemoteMedia", () => {
     const text = "# Title\n\n- [link](https://example.com)\n- **bold** and [[Note]]\n\n> quote";
     expect(withoutRemoteMedia(text)).toBe(text);
   });
+
+  it("for a note, turns remote images and tags with a remote address into text, and keeps the user's HTML (#395)", () => {
+    expect(withoutRemoteMedia("![a](https://x.example/y.png) ![[local.png]]", "remote"))
+      .toBe("[image: a (not loaded)](https://x.example/y.png) ![[local.png]]");
+    expect(withoutRemoteMedia('<img src="https://x.example/y.png"> <mark>kept</mark> <a href="https://x.example">l</a>', "remote"))
+      .toBe('&lt;img src="https://x.example/y.png"> <mark>kept</mark> <a href="https://x.example">l</a>');
+  });
 });
+
+describe("withoutPluginCode (#395)", () => {
+  const plugin = (language: string): boolean => ["dataviewjs", "dataview", "js-engine"].includes(language);
+
+  it("shows another plugin's block as plain code", () => {
+    expect(withoutPluginCode("```dataviewjs\ndv.list()\n```", plugin)).toBe("```text\ndv.list()\n```");
+    expect(withoutPluginCode("~~~~js-engine\nreturn 1\n~~~~", plugin)).toBe("~~~~text\nreturn 1\n~~~~");
+  });
+
+  it("leaves Obsidian's own blocks and ordinary code alone, even when a plugin registered the language", () => {
+    const text = "```base\nviews: []\n```\n```mermaid\na-->b\n```\n```python\nprint()\n```";
+    expect(withoutPluginCode(text, () => true).split("\n").filter((l) => l.startsWith("```")))
+      .toEqual(["```base", "```", "```mermaid", "```", "```text", "```"]);
+    expect(withoutPluginCode(text, plugin)).toBe(text);
+  });
+
+  it("does not take a fence inside a block for the start of another", () => {
+    const text = "````markdown\n```dataviewjs\nx\n```\n````";
+    expect(withoutPluginCode(text, plugin)).toBe(text);
+  });
+
+  it("keeps Dataview's inline queries from matching, outside code blocks only", () => {
+    const shown = withoutPluginCode("Due `= this.due` and `$= dv.current()`, but `a = b` stays", plugin);
+    expect(shown).toBe(`Due \`${ZWSP}= this.due\` and \`${ZWSP}$= dv.current()\`, but \`a = b\` stays`);
+    const block = "```js\nconst x = `= y`;\n```";
+    expect(withoutPluginCode(block, plugin)).toBe(block);
+  });
+});
+
+const ZWSP = String.fromCharCode(0x200b);

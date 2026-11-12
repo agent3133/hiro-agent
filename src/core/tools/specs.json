@@ -252,7 +252,7 @@
   },
   {
     "name": "search_vault",
-    "description": "Search notes for a case-insensitive substring. Optionally restrict to notes carrying *tag*\n(frontmatter or inline #tag) or living under *folder*; with only a tag or folder, every match is listed.",
+    "description": "Search the text of notes, case-insensitively. A note matches when it holds every word of *query*, in any order; put words in \"quotes\" to find them as one phrase. Each result is a note with its matching lines and their numbers, the best matches first, or the newest with sort=modified. Optionally restrict to notes carrying *tag*\n(frontmatter or inline #tag) or living under *folder*; with only a tag or folder, every match is listed.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -270,6 +270,12 @@
         },
         "folder": {
           "default": "",
+          "type": "string"
+        },
+        "sort": {
+          "default": "relevance",
+          "description": "relevance: best matches first; modified: newest first",
+          "enum": ["relevance", "modified"],
           "type": "string"
         }
       },
@@ -447,6 +453,11 @@
           "type": "integer",
           "description": "Rows to return, 50 by default. For more, e.g. all rows of a large Base, set it higher, e.g. 100; the answer says how many rows there are."
         },
+        "count_by": {
+          "default": "",
+          "type": "string",
+          "description": "A property to count the rows by, e.g. 'projects': the answer gives the number of rows per value instead of the rows. For questions like how many, or which has the most."
+        },
         "note": {
           "default": "",
           "type": "string",
@@ -584,7 +595,7 @@
   },
   {
     "name": "read_attachment",
-    "description": "Read an attachment file from the vault. PDF files are returned as their text when they have a text layer, and otherwise rendered page-by-page as images; as_text chooses. Image\nfiles (png, jpg, jpeg, gif, webp, bmp, tiff) are returned as images, video files (mp4, webm, avi,\nmov, mkv) are sampled as frames via ffmpeg plus a transcript of their audio track, and audio\nrecordings (m4a, mp3, wav, ogg, opus, flac, aac, audio-only webm) are transcribed to timestamped\ntext. Transcripts are saved below the recording's embed and reused on later calls. You may pass a bare filename (e.g. 'photo.jpg') and\nthe tool will locate the file anywhere in the vault automatically. Office documents (docx, xlsx, pptx), OpenDocument (odt, ods, odp), EPUB books, canvases and text files (csv, json, txt, …) are returned as text; pages picks the sheets, slides or chapters.",
+    "description": "Read an attachment file from the vault. PDF files are returned as their text when they have a text layer, and otherwise rendered page-by-page as images; as_text chooses. Image\nfiles (png, jpg, jpeg, gif, webp, bmp, ico, avif) are returned as images and svg as its XML, video files (mp4, webm, avi,\nmov, mkv) are sampled as frames via ffmpeg plus a transcript of their audio track, and audio\nrecordings (m4a, mp3, wav, ogg, opus, flac, aac, audio-only webm) are transcribed to timestamped\ntext. Transcripts are saved below the recording's embed and reused on later calls. You may pass a bare filename (e.g. 'photo.jpg') and\nthe tool will locate the file anywhere in the vault automatically. Office documents (docx, xlsx, pptx), OpenDocument (odt, ods, odp), EPUB books, canvases and text files (csv, json, txt, …) are returned as text; pages picks the sheets, slides or chapters.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -669,7 +680,7 @@
   },
   {
     "name": "web_fetch",
-    "description": "Fetch the text content of a URL. Returns the page content as plain text or markdown.",
+    "description": "Fetch the text content of a URL. Returns the page content as plain text or markdown. A PDF, image or other file is not read: the answer names its type and size.",
     "parameters": {
       "type": "object",
       "properties": {

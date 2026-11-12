@@ -13,6 +13,7 @@ import { messageOf } from "../core/errors";
 import { draftOf, emptyDraft, serverChange, type McpDraft } from "../mcp/draft";
 import type { McpServerStatus, McpTest } from "../mcp/service";
 import type { McpServerSpec } from "../mcp/servers";
+import { AskModal } from "../view/AskModal";
 
 export interface McpUiHost {
   app: App;
@@ -108,11 +109,20 @@ function serverRow(setting: Setting, server: McpServerStatus, host: McpUiHost, t
   setting.addExtraButton((button) => button.setIcon("pencil").setTooltip("Edit").onClick(() => {
     openEditor(host, spec, taken);
   }));
-  setting.addExtraButton((button) => button.setIcon("trash").setTooltip("Remove").onClick(async () => {
-    const saved = await host.save({ mcp_servers: { [spec.name]: null } });
-    if (!saved?.ok) return;
-    await host.revoke(spec.name);
-    host.redraw();
+  setting.addExtraButton((button) => button.setIcon("trash").setTooltip("Remove").onClick(() => {
+    new AskModal(host.app, {
+      title: `Remove ${spec.name}?`,
+      body: "The server is removed from the settings. Agents can no longer use its tools.",
+      confirm: "Remove",
+    }, (yes) => {
+      if (!yes) return;
+      void (async () => {
+        const saved = await host.save({ mcp_servers: { [spec.name]: null } });
+        if (!saved?.ok) return;
+        await host.revoke(spec.name);
+        host.redraw();
+      })().catch((error: unknown) => new Notice(messageOf(error), 10_000));
+    }).open();
   }));
 }
 

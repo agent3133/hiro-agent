@@ -79,7 +79,10 @@ export function docxToMarkdown(parts: Map<string, string>): string {
   const links = relationships(parts.get("word/_rels/document.xml.rels"));
   const counters = new Map<string, number>();
 
-  /** The text of the runs below *element*, in order: links as Markdown, deleted text left out. */
+  /**
+   * The text of the runs below *element*, in order: links as Markdown, deleted text left out, and so is the old place
+   * of moved text (#383).
+   */
   const inline = (element: Element): string => {
     let text = "";
     for (const node of Array.from(element.children)) {
@@ -87,8 +90,20 @@ export function docxToMarkdown(parts: Map<string, string>): string {
         case "t": text += node.textContent ?? ""; break;
         case "tab": text += "\t"; break;
         case "br": case "cr": text += "\n"; break;
-        case "drawing": case "pict": text += "[image]"; break;
-        case "del": case "delText": case "rPr": case "pPr": break;
+        // A text box's words, rather than a picture: Word keeps them in the drawing (#383)
+        case "drawing": case "pict": {
+          const boxes = descendants(node, "txbxContent");
+          text += boxes.length ? boxes.map((box) => children(box, "p").map((p) => inline(p).trim()).filter(Boolean).join(" "))
+            .filter(Boolean).join(" ") : "[image]";
+          break;
+        }
+        // Word writes a drawing twice, for new and old readers: the first, not both (#383)
+        case "AlternateContent": {
+          const chosen = child(node, "Choice") ?? child(node, "Fallback");
+          if (chosen) text += inline(chosen);
+          break;
+        }
+        case "del": case "delText": case "moveFrom": case "rPr": case "pPr": break;
         case "hyperlink": {
           const label = inline(node);
           const target = links.get(relId(node));
@@ -125,9 +140,18 @@ export function docxToMarkdown(parts: Map<string, string>): string {
     return text;
   };
 
+  /** A cell's paragraphs, and a table inside it as lines of its cells (a Markdown cell cannot hold a table, #383). */
+  const cellText = (tc: Element): string => children(tc).map((part) => {
+    if (part.localName === "p") return paragraph(part);
+    if (part.localName === "tbl") {
+      return children(part, "tr").map((row) => children(row, "tc").map(cellText).filter(Boolean).join(" / "))
+        .filter(Boolean).join("\n");
+    }
+    return "";
+  }).filter(Boolean).join("\n");
+
   const table = (tbl: Element): string => {
-    const rows = children(tbl, "tr").map((row) => children(row, "tc").map((tc) =>
-      children(tc, "p").map(paragraph).filter(Boolean).join("\n")));
+    const rows = children(tbl, "tr").map((row) => children(row, "tc").map(cellText));
     return rows.length ? markdownTable(rows) : "";
   };
 
@@ -137,7 +161,7 @@ export function docxToMarkdown(parts: Map<string, string>): string {
       if (element.localName === "p") blocks.push(paragraph(element));
       else if (element.localName === "tbl") blocks.push(table(element));
       else if (element.localName === "sdt") walk(child(element, "sdtContent") ?? element);
-      else if (element.localName === "ins") walk(element);
+      else if (element.localName === "ins" || element.localName === "moveTo") walk(element);
     }
   };
   walk(body);

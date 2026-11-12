@@ -40,6 +40,24 @@ export interface Connection {
   reasoningEffort?: string;
   /** The wire format: OpenAI's Responses API, or chat completions, which every other server speaks (#295). */
   api: "responses" | "chat_completions";
+  /** How many requests the server serves at once, when it says (llama.cpp's slots, #206). */
+  slots?: number;
+}
+
+/** How many answers an API or a vLLM server, which batch requests, takes from the chats at once (#206). */
+export const MOST_AT_ONCE = 4;
+
+/**
+ * How many answers may run on *connection* at the same time (#206): a llama.cpp server as many as it has slots,
+ * Ollama and LM Studio one (they say nothing, and usually serve one), vLLM and an ordinary API a few.
+ */
+export function answersAtOnce(connection: Pick<Connection, "server" | "slots">): number {
+  switch (connection.server) {
+    case "llama.cpp": return Math.max(1, Math.min(connection.slots ?? 1, MOST_AT_ONCE));
+    case "Ollama":
+    case "LM Studio": return 1;
+    default: return MOST_AT_ONCE;
+  }
 }
 
 /** Named sets of sampling values — `SAMPLING_PRESETS`. A preset fills only what is not set explicitly. */
@@ -209,5 +227,6 @@ export async function detectConnection(connection: Connection, get: GetJson, cac
     model: connection.model || found.models[0] || "",
     contextWindow: found.contextWindow ?? connection.contextWindow,
     enableThinking: connection.enableThinking ?? (found.thinking ? true : undefined),
+    ...(found.slots ? { slots: found.slots } : {}),
   };
 }

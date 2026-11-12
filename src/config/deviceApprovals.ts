@@ -13,6 +13,8 @@
  * approves what is already there: it all ran without asking before.
  */
 
+import { isLoopbackUrl } from "../core/loopback";
+
 export const DEVICE_APPROVALS_KEY = "agent-device-approved";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -44,11 +46,6 @@ export class DeviceApprovals {
     }
   }
 
-  /** Whether this device has kept approvals before; false on the first start of a version that asks. */
-  initialized(): boolean {
-    return this.stored() !== null;
-  }
-
   approved(approval: Approval): boolean {
     return this.stored()?.[approval.id] === approval.fingerprint;
   }
@@ -61,18 +58,29 @@ export class DeviceApprovals {
 }
 
 /**
- * A connection's key and where it goes, or null when it sends no key. *name* is the profile, "" for the bare `llm`
- * section. A `${NAME}` reference is what sends a keychain secret; a local server without one needs no approval.
+ * Where a connection sends what it is given — the messages, the notes in them, and its key if it has one — or null
+ * when there is nothing to approve. *name* is the profile, "" for the bare `llm` section.
+ *
+ * A `${NAME}` reference sends a keychain secret, wherever it goes (#136). Without a key the messages still go to the
+ * address, and synced settings could point it at someone else's server (#407): so an address on another computer
+ * is approved here too. A server on this computer without a key needs no approval.
  */
 export function connectionApproval(values: Values, name: string): Approval | null {
   const raw = name ? section(section(values, "llm_profiles"), name) : section(values, "llm");
   const reference = typeof raw.api_key === "string" ? /^\$\{([^}]+)\}$/.exec(raw.api_key.trim())?.[1] : undefined;
-  if (!reference) return null;
   const provider = String(raw.provider ?? "openai");
   const baseUrl = typeof raw.base_url === "string" && raw.base_url.trim()
     ? raw.base_url.trim() : provider === "openai" ? OPENAI_BASE_URL : "";
-  // Without an address the key goes nowhere — the turn stops first — so there is nothing to approve (#149)
+  // Without an address nothing goes anywhere — the turn stops first — so there is nothing to approve (#149)
   if (!baseUrl) return null;
+  if (!reference) {
+    if (isLoopbackUrl(baseUrl)) return null;
+    return {
+      id: `connection:${name || "llm"}`,
+      fingerprint: JSON.stringify([baseUrl, ""]),
+      what: `sends your messages to ${baseUrl}`,
+    };
+  }
   return {
     id: `connection:${name || "llm"}`,
     fingerprint: JSON.stringify([baseUrl, reference]),

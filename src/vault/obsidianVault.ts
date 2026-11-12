@@ -10,19 +10,25 @@
 import { normalizePath, TFile, TFolder, type App } from "obsidian";
 
 import type { Change } from "../core/journal";
+import { isFileSystemAlias } from "../core/paths";
 import type { VaultPort } from "../core/vault";
 
 let writes = 0;
-let recorder: ((change: Change) => void) | null = null;
 
-/** Report every write, move and delete to *record* (the in-plugin agent's undo journal); null stops it. */
-export function setRecorder(record: ((change: Change) => void) | null): void {
-  recorder = record;
-}
+/** The dot folders at the vault's root that listings include: the plugin's own, and the vault's trash (#399). */
+export const WALKED_DOT_FOLDERS = [".agents", ".sessions", ".memory", ".tools", ".trash"];
+/** How long one walk of those folders is used again, unless something was written meanwhile. */
+const DOT_WALK_KEPT_MS = 3000;
 
-/** Report a change made outside obsidianVault — a tool that trashes or renames through Obsidian (#85). */
-export function recordChange(change: Change): void {
-  recorder?.(change);
+/** What a port's writes are reported to: the undo journal's turn of the answer that made them (#206). */
+export type Recorder = (change: Change) => void;
+
+/**
+ * Report a change made outside obsidianVault — a tool that trashes or renames through Obsidian (#85) — to the
+ * journal turn *vault*'s writes go to, if any.
+ */
+export function recordChange(vault: VaultPort, change: Change): void {
+  vault.record?.(change);
 }
 
 /** How many writes went through the vault so far — index questions wait for Obsidian to catch up after one. */
@@ -64,11 +70,12 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
 }
 
 /**
- * The VaultPort on *app*'s vault. Its writes go to the undo journal while a turn records them; with `record: false`
- * they never do — the settings' own writes (an agent saved in the Agents tab) are not the agent's changes (#177).
+ * The VaultPort on *app*'s vault. Its writes go to *record* — one answer's turn in the undo journal, so answers
+ * running side by side never take each other's changes (#206). Without it they go nowhere: the settings' own
+ * writes (an agent saved in the Agents tab) and the conversations' notes are not the agent's changes (#177).
  */
-export function obsidianVault(app: App, options: { record?: boolean } = {}): VaultPort {
-  const record = (): ((change: Change) => void) | null => (options.record === false ? null : recorder);
+export function obsidianVault(app: App, options: { record?: Recorder | false } = {}): VaultPort {
+  const record = (): Recorder | null => options.record || null;
   const adapter = app.vault.adapter;
 
   /**
@@ -83,6 +90,24 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
       if (item instanceof TFile) files.push(item.path);
       else if (item instanceof TFolder && !item.isRoot()) folders.push(item.path);
     }
+    const dot = await dotFolders();
+    files.push(...dot.files);
+    folders.push(...dot.folders);
+    return { files: [...new Set(files.map(clean))].sort(), folders: [...new Set(folders.map(clean))].sort() };
+  }
+
+  /**
+   * The plugin's own dot folders and the trash, walked through the adapter, which Obsidian does not index. Only
+   * those (#399): `.git` (obsidian-git) or another tool's folder has thousands of files, and walking them took a
+   * moment on every listing, several times per tool call. Kept until the next write through any port, and for a few
+   * seconds at most: a tool call lists the vault several times within them, and a file put there by hand (an agent
+   * copied into `.agents/`) shows on the next listing after that.
+   */
+  let walked: { at: number; time: number; files: string[]; folders: string[] } | null = null;
+  async function dotFolders(): Promise<{ files: string[]; folders: string[] }> {
+    if (walked && walked.at === writes && Date.now() - walked.time < DOT_WALK_KEPT_MS) return walked;
+    const files: string[] = [];
+    const folders: string[] = [];
     const visit = async (folder: string): Promise<void> => {
       const listed = await adapter.list(folder);
       files.push(...listed.files);
@@ -91,27 +116,48 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
         await visit(sub);
       }
     };
-    for (const folder of (await adapter.list("/")).folders.map(clean)) {
-      if (!folder.startsWith(".") || folder === app.vault.configDir) continue;
+    for (const folder of WALKED_DOT_FOLDERS) {
+      if (folder === app.vault.configDir || !(await adapter.exists(folder))) continue;
       folders.push(folder);
       await visit(folder);
     }
-    return { files: [...new Set(files.map(clean))].sort(), folders: [...new Set(folders.map(clean))].sort() };
+    walked = { at: writes, time: Date.now(), files, folders };
+    return walked;
   }
 
-  // Through the adapter: it answers for the dot folders too, which the index does not hold
+  /**
+   * Whether the adapter may answer for *path*, which the index does not hold (#393): only in a dot folder, which
+   * Obsidian does not index, and never by another name for a file (`AGENTS~1`, `x::$DATA`): the file system would
+   * follow such a name past the checks made on the name as written.
+   */
+  const adapterMayReach = (normalized: string): boolean => {
+    const parts = normalized.split("/");
+    return parts.some((part) => part.startsWith(".")) && !parts.some(isFileSystemAlias);
+  };
+
+  // The index first; the adapter for the dot folders, which the index does not hold
   const kind = async (path: string): Promise<"file" | "folder" | null> => {
-    const stat = await adapter.stat(normalizePath(path));
+    const normalized = normalizePath(path);
+    const indexed = app.vault.getAbstractFileByPath(normalized);
+    if (indexed instanceof TFile) return "file";
+    if (indexed instanceof TFolder) return "folder";
+    if (!adapterMayReach(normalized)) return null;
+    const stat = await adapter.stat(normalized);
     return stat ? stat.type : null;
+  };
+
+  /** Read through the adapter what the index does not hold, or say it is not there. */
+  const readOutside = async (normalized: string): Promise<string> => {
+    if (!adapterMayReach(normalized)) throw new Error(`'${normalized}' was not found`);
+    return adapter.read(normalized);
   };
 
   /** A file's text when the journal needs it, null when there is no file. */
   const before = async (path: string): Promise<string | null> => {
     if (!record()) return null;
-    const stat = await adapter.stat(normalizePath(path));
-    if (stat?.type !== "file") return null;
+    if ((await kind(path)) !== "file") return null;
     const file = app.vault.getAbstractFileByPath(normalizePath(path));
-    return file instanceof TFile ? app.vault.read(file) : adapter.read(normalizePath(path));
+    return file instanceof TFile ? app.vault.read(file) : readOutside(normalizePath(path));
   };
 
   const write = async (path: string, text: string): Promise<void> => {
@@ -122,6 +168,9 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
       // A background edit (Obsidian's guidelines): process() applies it atomically to the file as it is now
       await app.vault.process(file, () => text);
       return;
+    }
+    if (normalized.split("/").some(isFileSystemAlias)) {
+      throw new Error(`'${normalized}' has the form of another name for a file and is not written (#393)`);
     }
     const parent = normalized.split("/").slice(0, -1).join("/");
     if (normalized.split("/").some((part) => part.startsWith("."))) {
@@ -135,13 +184,14 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
   };
 
   return {
+    ...(options.record ? { record: options.record } : {}),
     files: async () => (await walk()).files,
     folders: async () => (await walk()).folders,
     isFile: async (path) => (await kind(path)) === "file",
     isFolder: async (path) => (path === "" ? true : (await kind(path)) === "folder"),
     read: async (path) => {
       const file = app.vault.getAbstractFileByPath(normalizePath(path));
-      return file instanceof TFile ? app.vault.read(file) : adapter.read(normalizePath(path));
+      return file instanceof TFile ? app.vault.read(file) : readOutside(normalizePath(path));
     },
     write: async (path, text) => {
       const previous = await before(path);
@@ -163,7 +213,7 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
         });
       } else {
         // Not in the index (a dot folder): read and write, as write() does there
-        previous = await adapter.read(normalized);
+        previous = await readOutside(normalized);
         after = change(previous);
         await write(normalized, after);
       }
@@ -172,15 +222,17 @@ export function obsidianVault(app: App, options: { record?: boolean } = {}): Vau
     },
     modified: async (path) => {
       const file = app.vault.getAbstractFileByPath(normalizePath(path));
-      return file instanceof TFile ? file.stat.mtime : ((await adapter.stat(normalizePath(path)))?.mtime ?? 0);
+      if (file instanceof TFile) return file.stat.mtime;
+      return adapterMayReach(normalizePath(path)) ? ((await adapter.stat(normalizePath(path)))?.mtime ?? 0) : 0;
     },
     size: async (path) => {
       const file = app.vault.getAbstractFileByPath(normalizePath(path));
-      return file instanceof TFile ? file.stat.size : ((await adapter.stat(normalizePath(path)))?.size ?? 0);
+      if (file instanceof TFile) return file.stat.size;
+      return adapterMayReach(normalizePath(path)) ? ((await adapter.stat(normalizePath(path)))?.size ?? 0) : 0;
     },
     cachedRead: async (path) => {
       const file = app.vault.getAbstractFileByPath(normalizePath(path));
-      return file instanceof TFile ? app.vault.cachedRead(file) : adapter.read(normalizePath(path));
+      return file instanceof TFile ? app.vault.cachedRead(file) : readOutside(normalizePath(path));
     },
     remove: async (path) => {
       writes += 1;

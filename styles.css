@@ -38,6 +38,11 @@
 }
 .obsidian-agent-setup-title { font-weight: var(--font-semibold); margin-top: 0; }
 .obsidian-agent-setup-buttons, .obsidian-agent-setup button { margin-right: var(--size-4-2); }
+/* The memory profile's editor (#401) */
+.obsidian-agent-profile-text { width: 100%; min-height: 18em; font-family: var(--font-monospace); font-size: var(--font-ui-small); }
+/* The empty chat's example requests (#400): one per line, plain until hovered */
+.obsidian-agent-example-list { display: flex; flex-direction: column; align-items: flex-start; gap: var(--size-4-1); }
+.obsidian-agent-example { font-size: var(--font-ui-small); }
 .obsidian-agent-body > :first-child { margin-top: 0; }
 .obsidian-agent-body > :last-child { margin-bottom: 0; }
 
@@ -70,6 +75,16 @@
   border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m);
   background: var(--background-primary); }
 .obsidian-agent-composer:focus-within { border-color: var(--interactive-accent); }
+/* [[ in the input: the notes to pick from, above the composer (#411) */
+.obsidian-agent-link-suggest { position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; z-index: 2;
+  max-height: 260px; overflow-y: auto; padding: var(--size-2-2); background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); box-shadow: var(--shadow-s); }
+.obsidian-agent-link-suggest.is-hidden { display: none; }
+.obsidian-agent-link-suggestion { display: flex; gap: var(--size-4-2); align-items: baseline; cursor: pointer;
+  padding: var(--size-2-2) var(--size-4-2); border-radius: var(--radius-s); }
+.obsidian-agent-link-suggestion.is-selected { background: var(--background-modifier-hover); }
+.obsidian-agent-link-folder { color: var(--text-muted); font-size: var(--font-ui-smaller); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .obsidian-agent-resize { position: absolute; top: -5px; left: 0; right: 0; height: 10px; cursor: ns-resize;
   touch-action: none; z-index: 1; }
 .obsidian-agent-resize::before { content: ""; position: absolute; top: 3px; left: 50%; width: 32px; height: 3px;

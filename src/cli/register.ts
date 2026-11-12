@@ -10,6 +10,7 @@ import type { SessionSummary } from "../core/sessions";
 import { ask, DEFAULT_TIMEOUT_SECONDS, renderAsk, type AskHost } from "./ask";
 import { agentsJson, agentsText, sessionsJson, sessionsText } from "./lists";
 import { renderStatus, type AgentStatus } from "./status";
+import { stop, type RunningAsks } from "./stop";
 import { undo, type UndoHost } from "./undo";
 
 export interface CliHost {
@@ -17,6 +18,8 @@ export interface CliHost {
   agents(): Promise<AgentSummary[]>;
   sessions(): Promise<SessionSummary[]>;
   ask: AskHost;
+  /** The answers agent:ask is running, which agent:stop stops (#415). */
+  running: RunningAsks;
   undo: UndoHost;
 }
 
@@ -46,6 +49,11 @@ export function registerCli(plugin: Plugin, host: CliHost): void {
     format: { value: "<text|json>", description: "json for scripts; text by default" },
     keep: { value: "<true|false>", description: "false: do not save the conversation (default true)" },
   }, async (params) => renderAsk(await ask(host.ask, params), params.format));
+  register(plugin, "agent:stop", "Stop answers started with agent:ask; Ctrl+C does not (#415)", {
+    session: { value: "<name>", description: "Only the answer in this conversation, as its notice names it" },
+    list: { description: "List the running answers instead" },
+    format: { value: "<text|json>", description: "json for scripts; text by default" },
+  }, (params) => stop(host.running, params));
   register(plugin, "agent:undo", "Take back what an answer changed, as the chat's undo button does (#302)", {
     turn: { value: "<id>", description: "The answer, as agent:ask prints it; the newest one not undone when not given" },
     list: { description: "List the answers that can be undone, newest first" },

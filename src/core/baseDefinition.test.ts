@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { parse } from "yaml";
-import { BASE_SYNTAX, embeddedBases, prepareBase, rowsTable, QUERY_VIEW_TYPE, PreparedBase } from "./baseDefinition";
+import {
+  BASE_SYNTAX, embeddedBases, prepareBase, rowsTable, QUERY_VIEW_TYPE, PreparedBase,
+  countTable, withColumn, bareStrings, filterHints,
+} from "./baseDefinition";
 
 describe("prepareBase and rowsTable", () => {
   // Behaviour 1: Two views "A" and "B"
@@ -247,5 +250,127 @@ describe("embeddedBases: the Bases in a note (2026-10-05)", () => {
       + "\n```yaml\nfilters: no\n```\n";
     expect(embeddedBases(note)).toEqual(['filters: file.hasTag("a")', 'filters: file.hasTag("b")']);
     expect(embeddedBases("# No Base\n\n```js\nconst base = 1;\n```\n")).toEqual([]);
+  });
+});
+
+describe("count_by (#267)", () => {
+  // A row is [file cells, projects cells]: each cell a list of its items
+  const cols = ["file", "projects"];
+  const ids = ["file", "projects"];
+  const dataRows = (table: string) => table.split("\n").slice(2).filter((line) => line.startsWith("| "));
+
+  it("counts the rows per value, most first, with (empty) for a row with no value", () => {
+    const cells = [
+      [["a.md"], ["[[A]]"]],
+      [["b.md"], ["[[B]]"]],
+      [["c.md"], ["[[A]]"]],
+      [["d.md"], []],
+    ];
+    const table = countTable(cols, ids, cells, "projects");
+    expect(dataRows(table)).toEqual(["| [[A]] | 2 |", "| [[B]] | 1 |", "| (empty) | 1 |"]);
+    expect(table.split("\n")[0]).toBe("| projects | rows |");
+  });
+
+  it("counts a row with two items once under each, and says so; without such a row it says nothing of it", () => {
+    const several = [
+      [["a.md"], ["[[A]]", "[[B]]"]],
+      [["b.md"], ["[[A]]"]],
+    ];
+    const withSeveral = countTable(cols, ids, several, "projects");
+    expect(withSeveral.endsWith("A row with several values is counted once under each of them.")).toBe(true);
+    expect(dataRows(withSeveral)).toEqual(["| [[A]] | 2 |", "| [[B]] | 1 |"]);
+
+    const single = [
+      [["a.md"], ["[[A]]"]],
+      [["b.md"], ["[[B]]"]],
+    ];
+    expect(countTable(cols, ids, single, "projects")).not.toContain("several values");
+  });
+
+  it("finds the column by its display name, ignoring a note. prefix on the request", () => {
+    const displayCols = ["file", "Projects"];
+    const cells = [
+      [["a.md"], ["[[A]]"]],
+      [["b.md"], ["[[A]]"]],
+    ];
+    const byPrefixed = countTable(displayCols, ids, cells, "note.projects");
+    const byDisplay = countTable(displayCols, ids, cells, "Projects");
+    expect(byPrefixed).toBe(byDisplay);
+    expect(dataRows(byDisplay)).toEqual(["| [[A]] | 2 |"]);
+    expect(byDisplay.split("\n")[0]).toBe("| Projects | rows |");
+  });
+
+  it("answers an error naming the columns when no column is the one asked for", () => {
+    const result = countTable(cols, ids, [[["a.md"], ["[[A]]"]]], "owner");
+    expect(result.startsWith("Error: the result has no column 'owner'")).toBe(true);
+    expect(result).toContain("'file'");
+    expect(result).toContain("'projects'");
+  });
+
+  it("adds the counted property to the view's order, or leaves the definition unchanged when it is shown", () => {
+    const prepared = (prepareBase("views:\n  - type: table\n    name: T\n    order: [file.name, status]\n") as PreparedBase).yaml;
+    const added = parse(withColumn(prepared, "projects")) as { views: { order: string[] }[] };
+    expect(added.views[0].order).toEqual(["file.name", "status", "projects"]);
+    expect(withColumn(prepared, "note.status")).toBe(prepared);
+  });
+});
+
+describe("filter hints (#389)", () => {
+  const none = () => new Map<string, number>();
+
+  it("finds the quoted strings that stand as a condition of their own", () => {
+    expect(bareStrings('file.hasTag("task") && "open"')).toEqual(["open"]);
+    expect(bareStrings('file.hasTag("task")')).toEqual([]);
+    expect(bareStrings('status == "open"')).toEqual([]);
+    expect(bareStrings('("open") || x')).toEqual(["open"]);
+  });
+
+  it("says a bare string is a string on its own, and no values when the filters matched", () => {
+    const hints = filterHints('filters: file.hasTag("task") && "open"', true, none);
+    expect(hints).toContain('The filter "open" is a string on its own');
+    expect(hints).not.toContain("takes these values");
+    expect(hints).not.toContain("No note in the vault");
+  });
+
+  it("says a comparison written with one = should use ==", () => {
+    const hints = filterHints('filters: status = "open"', true, none);
+    expect(hints).toContain("Compare with ==, not =: 'status == \"open\"'.");
+  });
+
+  it("lists the values a compared property takes in the vault when nothing matched, and says so when none", () => {
+    const values = (property: string) => {
+      if (property === "status") {
+        return new Map([["open", 60], ["in-progress", 25], ["done", 26]]);
+      }
+      return new Map<string, number>();
+    };
+    const hints = filterHints(
+      'filters: file.frontmatter.status == "open" && priority == "high"', false, values);
+    expect(hints).toContain('status takes these values in the vault (write it as status or note.status): '
+      + '"open" (60), "done" (26), "in-progress" (25).');
+    expect(hints).toContain("No note in the vault has a property priority.");
+    expect(hints).not.toContain("priority takes these values");
+    expect(hints).not.toContain("write it as priority");
+  });
+
+  it("lists the values of a compared property once, and never of a file property, when nothing matched", () => {
+    const definition = "filters:\n  and:\n    - file.hasTag(\"task\")\n    - 'status == \"x\"'\n";
+    const asked: string[] = [];
+    const values = (property: string) => {
+      asked.push(property);
+      return new Map([["x", 3]]);
+    };
+    const hints = filterHints(definition, false, values);
+    expect(hints.split("\n").filter((line) => line.startsWith("status takes these values"))).toHaveLength(1);
+    expect(asked.some((property) => property.startsWith("file."))).toBe(false);
+    expect(asked).toEqual(["status"]);
+
+    const askedWhenMatched: string[] = [];
+    const matchedHints = filterHints(definition, true, (property) => {
+      askedWhenMatched.push(property);
+      return new Map([["x", 3]]);
+    });
+    expect(matchedHints).not.toContain("takes these values");
+    expect(askedWhenMatched).toEqual([]);
   });
 });

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { makeVault } from "../core/testing/vault";
 import { AgentCatalog, unusableTools } from "./agents";
 import { writtenOutKey } from "./connections";
-import { featurePrompt, switchedOffTools } from "./features";
+import { featurePrompt, switchedOffTools, withMemoryTools } from "./features";
 
 const WEB_ON = { builtin_tools: { web_fetch: { enabled: true } } };
 
@@ -73,5 +73,25 @@ describe("writtenOutKey (#146)", () => {
     expect(writtenOutKey(values, "ref")).toBe(false);
     expect(writtenOutKey(values, "none")).toBe(false);
     expect(writtenOutKey(values, "")).toBe(false);
+  });
+});
+
+describe("the memory tools with Memory on (#401)", () => {
+  const on = { memory: { enabled: true } };
+  const assistant = { file: "assistant.md", tools: ["read_note"] };
+
+  it("are given to the built-in assistant while Memory is on", () => {
+    expect(withMemoryTools(assistant, on)).toEqual(["read_note", "read_user_memory", "update_user_memory"]);
+  });
+
+  it("are not given while Memory is off", () => {
+    expect(withMemoryTools(assistant, {})).toEqual(["read_note"]);
+    expect(withMemoryTools(assistant, { memory: { enabled: false } })).toEqual(["read_note"]);
+  });
+
+  it("are not given to another agent that does not list them, and not twice to one that does", () => {
+    expect(withMemoryTools({ file: "daily-note.md", tools: ["read_note"] }, on)).toEqual(["read_note"]);
+    expect(withMemoryTools({ file: "assistant.md", tools: ["read_user_memory"] }, on))
+      .toEqual(["read_user_memory", "update_user_memory"]);
   });
 });

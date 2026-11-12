@@ -34,6 +34,19 @@ function isOn(values: Values, feature: FeatureSwitch): boolean {
   return typeof node === "boolean" ? node : feature.onByDefault;
 }
 
+/** The tools that come with Memory. */
+export const MEMORY_TOOLS = ["read_user_memory", "update_user_memory"];
+
+/**
+ * The tools an agent is given: the ones it lists, and while Memory is on, the memory tools for the built-in assistant
+ * and a copy of it (`assistant.md`) (#401). Before, the switch alone did nothing: no built-in agent listed them, so
+ * the profile was read but never written. Other agents get them only by listing them.
+ */
+export function withMemoryTools(agent: { file: string; tools: string[] }, values: Values): string[] {
+  if (agent.file !== "assistant.md" || !isOn(values, MEMORY)) return agent.tools;
+  return [...agent.tools, ...MEMORY_TOOLS.filter((tool) => !agent.tools.includes(tool))];
+}
+
 /** The tools whose Features switch is off in *values*, with the switch's name. */
 export function switchedOffTools(values: Values): Record<string, string> {
   return Object.fromEntries(Object.entries(FEATURE_TOOLS)

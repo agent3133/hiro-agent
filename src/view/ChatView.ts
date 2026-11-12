@@ -14,7 +14,6 @@ import type { SavedCall, SessionSummary } from "../core/sessions";
 import { buildContext, type NoteContext } from "../commands/context";
 import { messageOf } from "../core/errors";
 import type { InProcessAgent } from "../inprocess/InProcessAgent";
-import { displayName } from "../mcp/servers";
 import { serverLabel, type LocalServer } from "../settings/connections";
 import { ConfirmModal } from "./ConfirmModal";
 import { AskModal } from "./AskModal";
@@ -27,15 +26,21 @@ import { sessionNameFor } from "./sessionName";
 import { ACCEPT, attachmentPrompt, checkAttachment, formatSize } from "./attachments";
 import { coalesce } from "./coalesce";
 import { asStreaming } from "./streamingMarkdown";
+import { tokenCount } from "./tokenCount";
+import { NoteLinkSuggest } from "./noteLinkSuggest";
+import { resizableInput } from "./composer";
+import { addToolRow, completeToolRow } from "./toolRows";
+import { conversationMarkdown, exportName, freePath } from "./conversationExport";
+import { ConversationPicker, type PickedConversation } from "./ConversationPicker";
+import { type FinishedCall, whatLeft, whatLeftLine } from "./whatLeft";
 import { RenameModal } from "./RenameModal";
 import { listedSessions, readableName, sessionLabels } from "./sessionLabels";
 import { pickedTarget } from "./pickedTarget";
-import { callArguments, callLine } from "./toolCallText";
-import { isRemote, withoutRemoteMedia } from "./safeMarkdown";
+import { isRemote, withoutPluginCode, withoutRemoteMedia } from "./safeMarkdown";
+import { isPluginBlock } from "../vault/pluginBlocks";
 
 export const CHAT_VIEW_TYPE = "obsidian-agent-chat";
 /** The input's height the user pulled it to, on this device (Obsidian's local storage, per vault). */
-const INPUT_HEIGHT_KEY = "hiro-agent-input-height";
 /** The agents are read again on the way into a chat at most this often: reading them is a few small files. */
 const AGENTS_REREAD_MS = 5_000;
 
@@ -82,8 +87,17 @@ export interface SetupHost {
   findLocal(): Promise<LocalServer[]>;
   /** Add *server* as a connection; the reason when it could not be saved. */
   addLocal(server: LocalServer): Promise<string | null>;
+  /** The form to add a connection with a key from Obsidian's keychain: a cloud API (#400). */
+  addKey(): void;
   openSettings(): void;
 }
+
+/** What an empty chat offers to ask (#400): about the open note, the day, and the vault. */
+export const EXAMPLE_REQUESTS = [
+  "Summarize the note I have open",
+  "What is on my list for today?",
+  "Which notes did I change this week?",
+];
 
 /** The picker's entry for an open conversation that is not kept (#286): not a name a note can have. */
 const UNKEPT = "\u0000unkept";
@@ -111,11 +125,21 @@ export class ChatView extends ItemView {
   private firstPrompt = "";
   private turnId: string | null = null;
   private streaming: { body: HTMLElement; text: string } | null = null;
+  /** The chat was closed while an answer ran; its onDone says so in a notice instead of drawing (#413). */
+  private closedWhileAnswering = false;
+  /** The kept conversations as the picker lists them, for *Find a conversation…* (#412). */
+  private listed: PickedConversation[] = [];
+  /** The note list `[[` opens in the input (#411). */
+  private linkSuggest: NoteLinkSuggest | null = null;
+  /** The tokens this conversation's answers spent since this chat opened it, as the servers counted them (#414). */
+  private spentHere = { input: 0, output: 0 };
   // The note last worked in. Once the chat has the focus, Obsidian's activeEditor is empty, so a selection made
   // before clicking into the chat would be lost; the editor keeps it, and this remembers the editor
   private lastNote: MarkdownView | null = null;
   // Shown while no connection is set up (#110), in place of a first message that could only fail
   private setupCard: HTMLElement | null = null;
+  /** The example requests an empty chat shows (#400), until the first message. */
+  private examples: HTMLElement | null = null;
   // Above the input: the note and selection a typed message takes along (#218)
   private contextLine: HTMLElement | null = null;
   /** This view's own, for its conversation while it is not kept: two chats never share one (#153). */
@@ -215,12 +239,15 @@ export class ChatView extends ItemView {
     this.chips = composer.createDiv({ cls: "obsidian-agent-attachments is-hidden" });
     this.input = composer.createEl("textarea", {
       cls: "obsidian-agent-input",
-      attr: { rows: "3", placeholder: "Ask the agent — Enter to send, Shift+Enter for a new line" },
+      attr: { rows: "3", placeholder: "Ask the agent — Enter to send, Shift+Enter for a new line, [[ for a note" },
     });
-    this.resizable(handle, root);
+    // [[ suggests notes (#411); made before the input's own keydown handler, so Enter that picks does not send
+    this.linkSuggest = new NoteLinkSuggest(this.input, composer,
+                                           () => this.app.vault.getMarkdownFiles().map((file) => file.path));
+    resizableInput(this.app, this.input, handle, root);
     const toolbar = composer.createDiv({ cls: "obsidian-agent-toolbar" });
     const add = toolbar.createEl("button", { cls: "clickable-icon obsidian-agent-add",
-                                             attr: { "aria-label": "Add images, PDFs, recordings or videos" } });
+                                             attr: { "aria-label": "Add images, PDFs, documents, recordings or videos" } });
     setIcon(add, "plus");
     const picker = toolbar.createEl("input", { type: "file", attr: { multiple: "", accept: ACCEPT } });
     picker.hide();
@@ -253,6 +280,9 @@ export class ChatView extends ItemView {
 
     this.sendButton.onclick = () => void this.submit();
     this.input.addEventListener("keydown", (event) => {
+      // Enter that ends an input method's composition (Japanese, Chinese, Korean) picks the word, and sends
+      // nothing (#400). Obsidian runs on Chromium, which sets the flag on that keydown
+      if (event.isComposing) return;
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         void this.submit();
@@ -262,6 +292,11 @@ export class ChatView extends ItemView {
     // Escape cancels a running turn rather than closing the view out from under it.
     this.scope = new Scope(this.app.scope);
     this.scope.register([], "Escape", () => {
+      // An open note list closes first (#411)
+      if (this.linkSuggest?.isOpen()) {
+        this.linkSuggest.close();
+        return false;
+      }
       if (!this.turnId) return true;
       this.cancel();
       return false;
@@ -288,13 +323,58 @@ export class ChatView extends ItemView {
     const last = this.deps.lastSession();
     if (!this.deps.setup.ready()) this.showSetup();
     else if (last && !this.deps.openElsewhere(last, this, false)) await this.openSession(last);
-    else void this.say("system", "Ready.", false);
+    else this.showExamples();
+  }
+
+  /**
+   * An empty chat: what one can ask, as requests a click puts into the box (#400), instead of the word "Ready.".
+   * Nothing is sent until the user sends it.
+   */
+  private showExamples(): void {
+    if (this.examples) return;
+    const card = this.messages.createDiv({ cls: "obsidian-agent-message mod-system obsidian-agent-examples" });
+    this.examples = card;
+    card.createEl("p", { text: "Ask about your notes, or have the agent change them. For example:" });
+    const list = card.createDiv({ cls: "obsidian-agent-example-list" });
+    for (const example of EXAMPLE_REQUESTS) {
+      const button = list.createEl("button", { text: example, cls: "obsidian-agent-example" });
+      button.onclick = () => {
+        this.input.value = example;
+        this.input.focus();
+      };
+    }
   }
 
   override async onClose(): Promise<void> {
+    // Obsidian closes a view without asking it. A running answer stops with it, and is said to have (#413): its
+    // answer ends in onDone, which then notices the chat is gone (closedWhileAnswering)
+    if (this.turnId) this.closedWhileAnswering = true;
     this.cancel();
     this.showContext(null);
     this.contentEl.empty();
+  }
+
+  /**
+   * The answer this chat was running when it was closed has stopped: a notice says so, and offers to take back what
+   * it changed, as its footer's Undo would have (#413).
+   */
+  private sayStoppedByClosing(changed: TurnChanges | null | undefined): void {
+    const notice = new Notice("", 0);
+    const message = createFragment((fragment) => {
+      fragment.createSpan({ text: changed?.files.length
+        ? `Closing the chat stopped its answer. It had changed ${changed.files.length === 1 ? "1 file" : `${changed.files.length} files`}; that stays unless you undo it.`
+        : "Closing the chat stopped its answer. It had changed nothing." });
+      if (changed?.files.length) {
+        const undo = fragment.createEl("button", { text: "Undo its changes", cls: "obsidian-agent-notice-undo" });
+        undo.onclick = () => {
+          notice.hide();
+          new UndoModal(this.app, this.deps.agent(), changed, () => undefined).open();
+        };
+      }
+    });
+    notice.setMessage(message);
+    // Without the button there is nothing to do with it: it goes by itself
+    if (!changed?.files.length) window.setTimeout(() => notice.hide(), 8000);
   }
 
   /** The conversation open here: its session name, or "" while it is not kept. */
@@ -365,6 +445,9 @@ export class ChatView extends ItemView {
                                + "(llama.cpp, Ollama, LM Studio, vLLM), or any OpenAI-compatible API." });
     const buttons = card.createDiv({ cls: "obsidian-agent-setup-buttons" });
     const find = buttons.createEl("button", { text: "Find a local server", cls: "mod-cta" });
+    // A cloud API needs a key, which Obsidian keeps in its keychain: the form asks for both (#400)
+    const key = buttons.createEl("button", { text: "Use an API key" });
+    key.onclick = () => this.deps.setup.addKey();
     const settings = buttons.createEl("button", { text: "Open settings" });
     settings.onclick = () => this.deps.setup.openSettings();
     const found = card.createDiv();
@@ -413,6 +496,7 @@ export class ChatView extends ItemView {
     sessions = listedSessions(sessions, this.sessionName,
                               (name) => ({ name, agent: "", model: "", updated: "", exchanges: 0 }));
     const labels = sessionLabels(sessions);
+    this.listed = sessions.map((session) => ({ name: session.name, label: labels.get(session.name) ?? session.name }));
     for (const session of sessions) {
       this.sessionPicker.createEl("option", { text: labels.get(session.name) ?? session.name, value: session.name });
     }
@@ -443,14 +527,43 @@ export class ChatView extends ItemView {
     menu.addItem((item) => item.setTitle("Open a new chat window").setIcon("plus")
       .onClick(() => void this.deps.newWindow()));
     menu.addSeparator();
+    // The picker is a plain list; this one filters as you type (#412)
+    menu.addItem((item) => item.setTitle("Find a conversation…").setIcon("search")
+      .setDisabled(!this.listed.length)
+      .onClick(() => new ConversationPicker(this.app, this.listed, (name) => void this.openSession(name)).open()));
     menu.addItem((item) => item.setTitle("Rename conversation…").setIcon("pencil")
       .onClick(() => this.renameConversation()));
+    // A copy to read, link and search, where new notes go; the conversation stays in .sessions/ (#412)
+    menu.addItem((item) => item.setTitle("Export as note").setIcon("file-output").setDisabled(!this.sessionName)
+      .onClick(() => void this.exportConversation()));
     menu.addItem((item) => {
       item.setTitle("Delete conversation").setIcon("trash-2").setDisabled(!this.sessionName)
         .onClick(() => this.askToDelete());
       (item as unknown as { setWarning?(warning: boolean): unknown }).setWarning?.(true);
     });
     menu.showAtMouseEvent(event);
+  }
+
+  /**
+   * Write the open kept conversation as a note to read where new notes go, and open it (#412). The conversation
+   * itself stays in `.sessions/`; the note is a copy.
+   */
+  async exportConversation(): Promise<TFile | null> {
+    const name = this.sessionName;
+    if (!name) return null;
+    try {
+      const saved = await this.deps.agent().session(name);
+      const title = this.titles.get(name) ?? readableName(name);
+      const folder = this.app.fileManager.getNewFileParent(this.app.workspace.getActiveFile()?.path ?? "").path;
+      const path = freePath(folder, exportName(title), (candidate) => this.app.vault.getAbstractFileByPath(candidate) !== null);
+      const file = await this.app.vault.create(path, conversationMarkdown(title, saved.messages, saved.summary));
+      await this.app.workspace.getLeaf("tab").openFile(file);
+      new Notice(`Exported as "${file.path}".`);
+      return file;
+    } catch (error) {
+      new Notice(`Not exported: ${messageOf(error)}`);
+      return null;
+    }
   }
 
   /**
@@ -537,6 +650,7 @@ export class ChatView extends ItemView {
     this.keepBox.checked = this.deps.keepByDefault();
     this.setSession("");
     this.messages.empty();
+    this.spentHere = { input: 0, output: 0 };
     this.showContext(null);
     void this.say("system", "New conversation.", false);
   }
@@ -557,6 +671,7 @@ export class ChatView extends ItemView {
     this.keepBox.checked = true; // it is a note already; the box shows the truth about this conversation
     this.setSession(name);
     this.messages.empty();
+    this.spentHere = { input: 0, output: 0 };
     this.showContext(null);
     try {
       const answer = await this.deps.agent().session(name);
@@ -622,8 +737,8 @@ export class ChatView extends ItemView {
         } catch {
           // Cut short in the note: the row goes without its argument
         }
-        const row = this.addToolRow(tools, { callId: "", name: call.name, input });
-        this.completeToolRow(row, call.result, call.error);
+        const row = addToolRow(tools, { callId: "", name: call.name, input });
+        completeToolRow(row, call.result, call.error);
       }
     }
     await this.renderMarkdown(content, turn.createDiv({ cls: "obsidian-agent-body" }));
@@ -684,6 +799,8 @@ export class ChatView extends ItemView {
     if (!saved) return;
     const prompt = attachmentPrompt(typed, saved);
     this.input.value = "";
+    this.examples?.remove();
+    this.examples = null;
     // The first turn names the conversation, and naming it is what writes it to a vault note: the box decides
     // whether this conversation exists outside the view — without a name it is kept in memory and nothing is written.
     if (!this.firstPrompt) this.firstPrompt = prompt;
@@ -714,6 +831,15 @@ export class ChatView extends ItemView {
     let thought = "";
 
     const rows = new Map<string, HTMLElement>();
+    // The answer's calls as they finish, for the line saying what it reached beyond the vault (#409)
+    const called = new Map<string, ToolCall>();
+    const finished: FinishedCall[] = [];
+    // Said while the answer waits for another chat's (#206), gone once it starts or ends
+    let waitingNote: HTMLElement | null = null;
+    const stopWaiting = (): void => {
+      waitingNote?.remove();
+      waitingNote = null;
+    };
     const runner = this.deps.agent();
     this.deps.used(this);
     this.turnId = runner.send(prompt, { agent: this.agentPicker.value, session: this.sessionName || undefined,
@@ -731,12 +857,29 @@ export class ChatView extends ItemView {
         thought += text;
         thinkingBody.setText(thought);
       },
-      onToolCall: (call) => rows.set(call.callId, this.addToolRow(tools, call)),
-      onToolResult: (callId, result, isError) => this.completeToolRow(rows.get(callId), result, isError),
+      onToolCall: (call) => {
+        rows.set(call.callId, addToolRow(tools, call));
+        called.set(call.callId, call);
+      },
+      onToolResult: (callId, result, isError) => {
+        completeToolRow(rows.get(callId), result, isError);
+        const call = called.get(callId);
+        if (call) finished.push({ name: call.name, input: call.input, result });
+      },
+      onWaiting: (waiting) => {
+        if (!waiting) {
+          stopWaiting();
+          return;
+        }
+        waitingNote ??= tools.createDiv({ cls: "obsidian-agent-note obsidian-agent-waiting",
+                                          text: "Waiting for another chat's answer to finish: the connection's server "
+                                            + "takes no more at once." });
+      },
       onConfirmRequest: (callId, name, input) => {
-        new ConfirmModal(this.app, { name, input }, (approved) => {
-          if (this.turnId) runner.confirm(this.turnId, callId, approved);
-        }).open();
+        // "Allow for this answer" (#405) is the chat's: it ends with the answer it was given in
+        new ConfirmModal(this.app, { name, input }, (approved, rest) => {
+          if (this.turnId) runner.confirm(this.turnId, callId, approved, rest);
+        }, true).open();
       },
       onContext: (tokens, window, estimated, peak, answering) =>
         this.showContext({ tokens, window, estimated, peak, answering }),
@@ -749,10 +892,23 @@ export class ChatView extends ItemView {
       },
       onSummary: (exchanges, summary, when) => void this.addSummaryDivider(exchanges, summary, { turn, when }),
       onDone: (reply, cancelled, usage, changed) => {
+        stopWaiting();
+        if (this.closedWhileAnswering) {
+          this.closedWhileAnswering = false;
+          this.turnId = null;
+          this.streaming = null;
+          this.sayStoppedByClosing(changed);
+          return;
+        }
         if (reply && this.streaming) answer.push({ text: reply, done: true });
         if (cancelled) turn.createDiv({ cls: "obsidian-agent-note", text: "Cancelled." });
         // A cancelled turn still gets its footer when it wrote something: stopping it is often why you want it back.
-        if (!cancelled || changed) this.addFooter(turn, body, usage, changed);
+        // The answer's Markdown, not the rendered page's text: tables, callouts and diagrams survive a copy or an insert
+        const markdown = reply || this.streaming?.text || "";
+        if (!cancelled || changed) this.addFooter(turn, markdown, usage, changed);
+        // Pages and MCP servers the answer reached, stopped or not: what went out, went out (#409)
+        const left = whatLeftLine(whatLeft(finished));
+        if (left) turn.createDiv({ cls: "obsidian-agent-note obsidian-agent-what-left", text: left });
         this.finishTurn();
         // The note was just written: the picker lists conversations by their last change, newest first, so this
         // one moves to the top, here and in the other chats (2026-10-05)
@@ -762,6 +918,7 @@ export class ChatView extends ItemView {
         }
       },
       onError: (error) => {
+        stopWaiting();
         turn.createDiv({ cls: "obsidian-agent-error", text: error });
         this.offerRetry(turn, message, prompt, context);
         this.finishTurn();
@@ -841,39 +998,28 @@ export class ChatView extends ItemView {
     this.scrollDown();
   }
 
-  private addToolRow(container: HTMLElement, call: ToolCall): HTMLElement {
-    const row = container.createEl("details", { cls: "obsidian-agent-tool" });
-    const summary = row.createEl("summary");
-    summary.createSpan({ cls: "obsidian-agent-tool-name", text: displayName(call.name) });
-    // Every argument on the line, the main one first; the full set when the row is unfolded (2026-10-05)
-    const line = callLine(call.input);
-    const argument = summary.createSpan({ cls: "obsidian-agent-tool-arg", text: line });
-    if (line) argument.setAttr("title", line);
-    summary.createSpan({ cls: "obsidian-agent-tool-state", text: "…" });
-    const all = callArguments(call.input);
-    if (all) row.createEl("pre", { cls: "obsidian-agent-tool-args", text: all });
-    row.createEl("pre", { cls: "obsidian-agent-tool-result" });
-    return row;
-  }
-
-  private completeToolRow(row: HTMLElement | undefined, result: string, isError: boolean): void {
-    if (!row) return;
-    const state = row.querySelector(".obsidian-agent-tool-state");
-    if (state) state.textContent = isError ? "failed" : "done";
-    row.toggleClass("mod-error", isError);
-    const pre = row.querySelector(".obsidian-agent-tool-result");
-    if (pre) pre.textContent = result.length > 2000 ? `${result.slice(0, 2000)}…` : result;
-    if (isError) row.setAttr("open", "true");
-  }
-
-  private addFooter(turn: HTMLElement, body: HTMLElement, usage: Record<string, unknown>,
+  private addFooter(turn: HTMLElement, markdown: string, usage: Record<string, unknown>,
                     changed: TurnChanges | null = null): void {
     const footer = turn.createDiv({ cls: "obsidian-agent-footer" });
     // Going back to an earlier message takes this answer's changes back too (#303)
     if (changed) turn.dataset.turn = changed.turn;
     const seconds = usage.seconds ? `${usage.seconds}s` : "";
     const calls = usage.tool_calls ? `${usage.tool_calls} tool call${usage.tool_calls === 1 ? "" : "s"}` : "";
-    footer.createSpan({ text: [seconds, calls].filter(Boolean).join(" · ") });
+    const summary = footer.createSpan({ text: [seconds, calls].filter(Boolean).join(" · ") });
+    // What the answer cost, where the server counted it (#414); the conversation's total in the tooltip. Inside the
+    // first span, so it reads as one line with it rather than across the footer's gap
+    const input = Number(usage.input_tokens);
+    const output = Number(usage.output_tokens);
+    if (Number.isFinite(input) && Number.isFinite(output) && usage.input_tokens !== undefined) {
+      this.spentHere = { input: this.spentHere.input + input, output: this.spentHere.output + output };
+      summary.createSpan({
+        cls: "obsidian-agent-footer-tokens",
+        text: `${seconds || calls ? " · " : ""}${tokenCount(input)} tokens in, ${tokenCount(output)} out`,
+        attr: { "aria-label": `This answer: ${input.toLocaleString("en")} tokens sent to the model, `
+          + `${output.toLocaleString("en")} received. This conversation in this chat: `
+          + `${this.spentHere.input.toLocaleString("en")} sent, ${this.spentHere.output.toLocaleString("en")} received.` },
+      });
+    }
 
     if (changed) {
       const count = changed.files.length;
@@ -886,13 +1032,13 @@ export class ChatView extends ItemView {
     const copy = footer.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Copy reply" } });
     setIcon(copy, "copy");
     copy.onclick = () => {
-      void navigator.clipboard.writeText(this.streaming?.text ?? body.getText());
+      void navigator.clipboard.writeText(markdown);
       new Notice("Copied.");
     };
 
     const insert = footer.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Insert into note" } });
     setIcon(insert, "file-input");
-    insert.onclick = () => this.insertIntoActiveNote(this.streaming?.text ?? body.getText());
+    insert.onclick = () => this.insertIntoActiveNote(markdown);
   }
 
   /**
@@ -964,7 +1110,8 @@ export class ChatView extends ItemView {
       new Notice("Open a note to insert into.");
       return;
     }
-    editor.replaceSelection(text);
+    // What the chat would not load, the note does not either: images from the web become links (#395)
+    editor.replaceSelection(withoutRemoteMedia(text, "remote"));
   }
 
   private cancel(): void {
@@ -1050,50 +1197,6 @@ export class ChatView extends ItemView {
     this.sendButton.onclick = running ? () => this.cancel() : () => void this.submit();
   }
 
-  /**
-   * The input's height follows *handle*, its box's top edge, pulled up or down: at least two lines, at most most of
-   * the chat. Kept on this device for every chat; a double-click goes back to the default.
-   */
-  private resizable(handle: HTMLElement, root: HTMLElement): void {
-    const apply = (height: number | null): void => {
-      if (height === null) this.input.style.removeProperty("height");
-      else this.input.style.height = `${Math.round(height)}px`;
-    };
-    const saved = Number(this.app.loadLocalStorage(INPUT_HEIGHT_KEY));
-    if (saved > 0) apply(saved);
-    handle.addEventListener("pointerdown", (start) => {
-      start.preventDefault();
-      // Captured, so the drag goes on outside the thin edge; a pointer that cannot be captured still drags over it
-      try {
-        handle.setPointerCapture(start.pointerId);
-      } catch {
-        // no active pointer by that id
-      }
-      const from = this.input.getBoundingClientRect().height;
-      const style = getComputedStyle(this.input);
-      // Two lines of text, and the padding around them
-      const smallest = (parseFloat(style.lineHeight) || 20) * 2 + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-      const move = (event: PointerEvent): void => {
-        // Up makes it taller: the box grows into the conversation above it
-        const wanted = from + (start.clientY - event.clientY);
-        apply(Math.min(Math.max(wanted, smallest), root.getBoundingClientRect().height * 0.7));
-      };
-      const stop = (): void => {
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", stop);
-        handle.removeEventListener("pointercancel", stop);
-        this.app.saveLocalStorage(INPUT_HEIGHT_KEY, String(Math.round(this.input.getBoundingClientRect().height)));
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", stop);
-      handle.addEventListener("pointercancel", stop);
-    });
-    handle.addEventListener("dblclick", () => {
-      apply(null);
-      this.app.saveLocalStorage(INPUT_HEIGHT_KEY, null);
-    });
-  }
-
   private async say(role: "user" | "system", text: string, markdown: boolean): Promise<HTMLElement> {
     const element = this.messages.createDiv({ cls: `obsidian-agent-message mod-${role}` });
     if (role === "user") {
@@ -1141,8 +1244,10 @@ export class ChatView extends ItemView {
   /** Obsidian's renderer, so links and embeds behave — and so model output is never parsed as HTML by us. */
   private async renderMarkdown(text: string, target: HTMLElement): Promise<void> {
     target.empty();
-    // Nothing in an answer fetches from the network by itself: images from the web become links (#137)
-    await MarkdownRenderer.render(this.app, withoutRemoteMedia(text), target, this.activeNotePath(), this);
+    // Nothing in an answer fetches from the network by itself: images from the web become links (#137); and no
+    // other plugin runs code from it: their blocks and inline queries are shown as code (#395)
+    await MarkdownRenderer.render(this.app, withoutPluginCode(withoutRemoteMedia(text), isPluginBlock), target,
+                                  this.activeNotePath(), this);
     this.drawnFrom.set(target, text);
     this.watchPermissionPrompts(target);
     // A second net, for whatever the renderer made of the rest: media pointing off the machine is removed

@@ -105,8 +105,9 @@ export function nodeMedia(settings: AudioSettings, fullPath: (path: string) => s
           const converted = await run(ffmpeg, ["-y", "-loglevel", "error", "-i", fullPath(path), "-vn", "-ar", "16000",
                                                "-ac", "1", "-c:a", "pcm_s16le", wav], 600_000);
           if (converted.missing) {
-            throw new TranscriptionError("ffmpeg is required for audio transcription but was not found — set its path "
-                                         + "under audio.ffmpeg, or put it on PATH");
+            throw new TranscriptionError("ffmpeg is required for audio transcription but was not found — set the "
+                                         + "ffmpeg program under Settings → Hiro Agent → Features → Audio "
+                                         + "transcription, or put it on PATH");
           }
           if (converted.code !== 0) {
             throw new TranscriptionError(`ffmpeg could not convert ${basename(path)}: ${converted.stderr.trim().slice(-300)}`);
@@ -121,7 +122,7 @@ export function nodeMedia(settings: AudioSettings, fullPath: (path: string) => s
         for (const wav of wavs) args.push("-f", wav);
         const timeout = Math.max(600, total * settings.timeoutFactor);
         const result = await run(settings.whisperCli, args, timeout * 1000);
-        if (result.missing) throw new TranscriptionError(`whisper-cli not found: ${settings.whisperCli} (set audio.whisper_cli)`);
+        if (result.missing) throw new TranscriptionError(`whisper-cli not found: ${settings.whisperCli} (set the whisper.cpp program under Settings → Hiro Agent → Features → Audio transcription)`);
         if (result.code !== 0) {
           const detail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-5).join(" ");
           throw new TranscriptionError(`whisper-cli failed (exit ${result.code}): ${detail}`);

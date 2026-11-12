@@ -120,6 +120,27 @@ export function draftProblem(draft: ConnectionDraft, taken: string[]): string | 
   return null;
 }
 
+import { isLoopbackHost } from "../core/loopback";
+
+export { isLoopbackHost };
+
+/**
+ * A warning when *draft* would send its key in clear text: a key and a plain `http://` address that is not this
+ * computer (#408). Anyone on the network between could read the key. Null otherwise.
+ */
+export function clearTextKeyWarning(draft: Pick<ConnectionDraft, "baseUrl" | "key">): string | null {
+  if (!draft.key || !/^http:\/\//i.test(draft.baseUrl)) return null;
+  let host: string;
+  try {
+    host = new URL(draft.baseUrl).hostname;
+  } catch {
+    return null;
+  }
+  if (isLoopbackHost(host)) return null;
+  return `The key would go to ${host} over plain http, readable on the network on the way. Use an https:// address, `
+    + "or leave the key empty if the server needs none.";
+}
+
 /**
  * The settings change that stores *draft*; empty fields are removed, so defaults apply. A stored `provider` goes
  * too: since #149 the kind of server is found out, and a stale one would only mislead.

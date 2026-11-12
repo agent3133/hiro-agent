@@ -88,6 +88,14 @@ function audioItems(root: ConfigSection, host: ConfigHost, changed: () => void,
     const field = findField(root, detail);
     if (!field) continue;
     const item = fieldItem(field, host, { label: LABELS[detail] });
+    // The model file is the step most likely to stop someone (#421): which one to get, and where
+    if (detail === "audio.model") {
+      const draw = item.render;
+      item.render = (setting, group) => {
+        draw(setting, group);
+        modelHelp(setting);
+      };
+    }
     const testable = TESTABLE[detail];
     if (testable && programs) {
       const draw = item.render;
@@ -99,6 +107,25 @@ function audioItems(root: ConfigSection, host: ConfigHost, changed: () => void,
     items.push(item);
   }
   return items;
+}
+
+/** Where whisper.cpp's own models are published: the ggml-*.bin files its program reads. */
+export const WHISPER_MODELS_URL = "https://huggingface.co/ggerganov/whisper.cpp/tree/main";
+
+/**
+ * Under the model file's path: which model to take and where to get it, with a button that opens the list (#421).
+ * The plugin downloads nothing itself: the file is large, and where it goes is the user's choice.
+ */
+export function modelHelp(setting: Setting): void {
+  setting.descEl.createDiv({
+    cls: "obsidian-agent-model-help",
+    text: "No model yet? Download one from whisper.cpp's list, save it anywhere on this computer, and put its path "
+      + "here. ggml-base.bin (about 150 MB) is a good start; ggml-small.bin (about 500 MB) understands more but is "
+      + "slower. The ones ending in .en are for English only.",
+  });
+  setting.addButton((button) => button.setButtonText("Get a model")
+    .setTooltip(WHISPER_MODELS_URL)
+    .onClick(() => window.open(WHISPER_MODELS_URL)));
 }
 
 /** Which program a path runs — and, when it runs nothing, the one PATH offers, in one click — and a Test button. */

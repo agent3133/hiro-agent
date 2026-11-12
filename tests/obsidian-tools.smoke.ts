@@ -46,7 +46,27 @@ const ATTACHMENTS: Record<string, Buffer> = {
   "data.csv": Buffer.from("a,b\n1,2\n"),
   "archive.zip": Buffer.from("PK not really a zip"),
   "voice.mp3": Buffer.from("not really audio"),
+  // Images the model server cannot load as they are (#380): a BMP to convert, a TIFF and an empty file to refuse
+  "red.bmp": oneRedPixelBmp(),
+  "scan.tiff": Buffer.from("II*\u0000\u0008\u0000\u0000\u0000", "latin1"),
+  "empty.png": Buffer.alloc(0),
 };
+
+/** A 1×1 red BMP, 24 bits a pixel: the file header, the info header, one row padded to four bytes. */
+function oneRedPixelBmp(): Buffer {
+  const bmp = Buffer.alloc(58);
+  bmp.write("BM", 0, "latin1");
+  bmp.writeUInt32LE(58, 2);
+  bmp.writeUInt32LE(54, 10);
+  bmp.writeUInt32LE(40, 14);
+  bmp.writeInt32LE(1, 18);
+  bmp.writeInt32LE(1, 22);
+  bmp.writeUInt16LE(1, 26);
+  bmp.writeUInt16LE(24, 28);
+  bmp.writeUInt32LE(4, 34);
+  bmp.set([0x00, 0x00, 0xff, 0x00], 54);
+  return bmp;
+}
 
 const vault = process.argv[2];
 const DIR = "_agent-smoke";
@@ -248,6 +268,16 @@ try {
     check("an image is given to the model", seen === `Image '${DIR}/pixel.png':\n[image]`, seen);
     check("a bare file name is found as Obsidian resolves embeds",
           tool("read_attachment", { path: "pixel.png" }) === "Image 'pixel.png':\n[image]");
+    check("…and by an agent limited to the folder it is in (#387)",
+          tool("read_attachment", { path: "pixel.png" }, [`scope=${DIR}`]) === "Image 'pixel.png':\n[image]");
+    // Through Obsidian's own image decoder (#380); format=json would show the PNG, the text answer names the image
+    check("a BMP is converted and given as an image", tool("read_attachment", { path: `${DIR}/red.bmp` })
+          === `Image '${DIR}/red.bmp':\n[image]`, tool("read_attachment", { path: `${DIR}/red.bmp` }));
+    check("a TIFF is refused, saying to save it as PNG or JPEG", tool("read_attachment", { path: `${DIR}/scan.tiff` })
+          === `Error: '${DIR}/scan.tiff' is a TIFF image, which cannot be shown to the model, so what it shows is unknown: `
+            + "do not guess it from the file's name. Ask the user to save it as PNG or JPEG.");
+    check("an empty image file is refused", tool("read_attachment", { path: `${DIR}/empty.png` })
+          === `Error: '${DIR}/empty.png' is empty (0 bytes), so there is no image to show`);
     const pdf = tool("read_attachment", { path: `${DIR}/one page.pdf` });
     check("a PDF is rendered page by page", pdf === `PDF '${DIR}/one page.pdf' — 1 page(s):\nPage 1/1:\n[image]`, pdf);
     // Its text layer, for models without vision, and a page it does not have (#166, #167)
@@ -259,6 +289,11 @@ try {
           && textPdf.includes("Invoice 2026-118.") && textPdf.endsWith("read it with as_text false.]"), textPdf);
     const textPdfImages = tool("read_attachment", { path: `${DIR}/text page.pdf`, as_text: false });
     check("as_text false shows its pages", textPdfImages === `PDF '${DIR}/text page.pdf' — 1 page(s):\nPage 1/1:\n[image]`, textPdfImages);
+    // A page as Obsidian embeds it (#386)
+    const embedded = tool("read_attachment", { path: `![[${DIR}/text page.pdf#page=1]]` });
+    // Page 1 of a one-page PDF is all of it, which the answer calls "1 page(s)"
+    check("an embed with #page= reads that page", embedded.startsWith(`PDF '${DIR}/text page.pdf' — 1 page(s), as text:`)
+          && embedded.includes("Invoice 2026-118."), embedded);
     check("a page the PDF does not have says so", tool("read_attachment", { path: `${DIR}/one page.pdf`, pages: "2" })
           === "Error: the PDF has pages 1-1; '2' is not among them");
     const csv = tool("read_attachment", { path: `${DIR}/data.csv` });
@@ -313,7 +348,10 @@ try {
     // Recordings (#84): whisper.cpp and ffmpeg, as the runtime's audio settings name them
     const made = (name: string, args: string[]): boolean =>
       spawnSync("ffmpeg", ["-y", "-loglevel", "error", ...args, join(vaultPath, DIR, name)], { stdio: "ignore" }).status === 0;
-    if (made("tone.m4a", ["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+    // A different tone on every run: a transcript of the same audio anywhere in the vault is its cache — the one an
+    // earlier run left in .trash too — and the first read here must be a new transcription (#372)
+    const frequency = 300 + Math.floor(Math.random() * 600);
+    if (made("tone.m4a", ["-f", "lavfi", "-i", `sine=frequency=${frequency}:duration=2`])
         && made("clip.mp4", ["-f", "lavfi", "-i", "testsrc=duration=3:size=160x120:rate=10", "-f", "lavfi",
                              "-i", "sine=frequency=330:duration=3", "-shortest", "-pix_fmt", "yuv420p"])) {
       tool("create_note", { path: `${DIR}/Memo.md`, content: "# Memo\n\n![[tone.m4a]]\n\nafter\n" });

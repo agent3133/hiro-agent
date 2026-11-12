@@ -7,7 +7,8 @@ import { inSpecOrder, makeTools, type MemorySettings, type Tool } from "../core/
 import { makeAttachmentTools } from "./attachmentTools";
 import { makeBasesTools } from "./basesTools";
 import { makeIndexTools } from "./indexTools";
-import { obsidianVault } from "./obsidianVault";
+import { obsidianVault, type Recorder } from "./obsidianVault";
+import { isPluginBlock } from "./pluginBlocks";
 import { makePluginTools } from "./pluginTools";
 import { DEFAULT_AUDIO, type AudioSettings } from "./media";
 import { DEFAULT_WEB, makeWebTools, type WebSettings } from "./webTools";
@@ -22,15 +23,27 @@ export interface ToolsetOptions {
   journal: { enabled: boolean; turns: number; maxBytes: number };
   /** Write each answer's tool calls into its kept conversation's note (`vault.save_tool_calls`, #282). */
   saveToolCalls: boolean;
+  /** Send each answer's tool calls and results again with the conversation's next messages (`vault.keep_tool_results`, #332). */
+  keepToolResults: boolean;
+  /**
+   * The hosts this conversation may open pages on without asking (#403): web_fetch asks for any other, and adds it
+   * once allowed. Without it — the prompt preview, `agent:tool` — web_fetch does not ask.
+   */
+  webHosts?: Set<string>;
 }
 
-export function obsidianToolset(app: App, scope: string[] | null, options: ToolsetOptions): Tool[] {
+/**
+ * The tools, their writes reported to *record*: the undo journal's turn of the one answer they are made for, so
+ * answers running side by side keep their changes apart (#206). Without it, nothing is journalled.
+ */
+export function obsidianToolset(app: App, scope: string[] | null, options: ToolsetOptions, record?: Recorder): Tool[] {
   // This vault's config folder, however it is named, and the user profile are out of the tools' reach (#135)
   protectVaultPaths({ configDir: app.vault.configDir, profilePath: options.memory?.profilePath });
-  const vault = obsidianVault(app);
-  return inSpecOrder([...makeTools(vault, scope, { memory: options.memory, configDir: app.vault.configDir }), ...makeIndexTools(app, vault, scope),
-                      ...makePluginTools(app, vault, scope), ...makeBasesTools(app, scope), ...makeAttachmentTools(app, scope, options.audio),
-                      ...makeWebTools(options.web)]);
+  const vault = obsidianVault(app, { record });
+  return inSpecOrder([...makeTools(vault, scope, { memory: options.memory, configDir: app.vault.configDir, isPluginBlock }),
+                      ...makeIndexTools(app, vault, scope),
+                      ...makePluginTools(app, vault, scope), ...makeBasesTools(app, scope), ...makeAttachmentTools(app, scope, options.audio, vault),
+                      ...makeWebTools(options.web, options.webHosts)]);
 }
 
 /** The tools' settings: from the agent's settings in the plugin (#86). */
@@ -48,6 +61,7 @@ export function toolsetOptions(config: { values: Record<string, unknown> } | nul
       maxBytes: number((config?.values.journal as Record<string, unknown> | undefined)?.max_mb, 20) * 1_000_000,
     },
     saveToolCalls: (config?.values.vault as Record<string, unknown> | undefined)?.save_tool_calls === true,
+    keepToolResults: (config?.values.vault as Record<string, unknown> | undefined)?.keep_tool_results === true,
     web: {
       fetch: { enabled: fetch.enabled === true, timeoutSeconds: number(fetch.timeout, DEFAULT_WEB.fetch.timeoutSeconds),
                maxContentLength: number(fetch.max_content_length, DEFAULT_WEB.fetch.maxContentLength) },

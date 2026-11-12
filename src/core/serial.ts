@@ -1,6 +1,7 @@
 /**
- * Work that must not overlap — turns, which share one undo journal (#177): each runs after the one before it has
- * finished, whether that one succeeded or failed. No Obsidian in here, so it can be tested under Node.
+ * Work that must not overlap — Bases queries (basesQuery.ts); answers have their own queue since #206
+ * (answerQueue.ts): each runs after the one before it has finished, whether that one succeeded or failed. No
+ * Obsidian in here, so it can be tested under Node.
  */
 
 export type Serially = <T>(work: () => Promise<T>) => Promise<T>;

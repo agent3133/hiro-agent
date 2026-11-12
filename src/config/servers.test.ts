@@ -2,7 +2,7 @@
 // server documents: llama.cpp's /props, vLLM's ModelCard, Ollama's /api/version and /api/ps, LM Studio's /api/v0.
 import { describe, expect, it } from "vitest";
 
-import { detectConnection, resolveConnection, type ServerCache } from "./connections";
+import { detectConnection, resolveConnection, type ServerCache, answersAtOnce, MOST_AT_ONCE } from "./connections";
 import { apiBase, detectServer, serverRoot, type GetJson } from "./servers";
 
 /** A server where only *answers* answer; anything else throws, as requestUrl does on a 404. */
@@ -142,5 +142,45 @@ describe("resolveConnection's address", () => {
   it("is OpenAI's when empty, and a stored llama.cpp connection without one has none", () => {
     expect(resolveConnection({ llm_profiles: { x: {} } }, "x", () => undefined).baseUrl).toBe("https://api.openai.com/v1");
     expect(resolveConnection({ llm_profiles: { x: { provider: "llamacpp" } } }, "x", () => undefined).baseUrl).toBe("");
+  });
+});
+
+describe("answers at once (#206)", () => {
+  it("detectServer on a llama.cpp server whose /props has total_slots: 3 returns slots: 3", async () => {
+    const { get } = server({
+      [`${LLAMA}/v1/models`]: { object: "list", data: [{ id: "qwen3.6-27b", owned_by: "llamacpp" }] },
+      [`${LLAMA}/props`]: { default_generation_settings: { n_ctx: 65536 }, total_slots: 3 },
+    });
+    const facts = await detectServer(LLAMA, get);
+    expect(facts).toHaveProperty("kind", "llama.cpp");
+    expect(facts.slots).toBe(3);
+  });
+
+  it("detectConnection on that same server carries slots: 3 into the connection it returns", async () => {
+    const { get } = server({
+      [`${LLAMA}/v1/models`]: { object: "list", data: [{ id: "qwen3.6-27b", owned_by: "llamacpp" }] },
+      [`${LLAMA}/props`]: { default_generation_settings: { n_ctx: 65536 }, total_slots: 3 },
+    });
+    const values = (base_url: string, model = "") => ({ llm_profiles: { x: { base_url, model } } });
+    const resolved = resolveConnection(values(LLAMA), "x", () => undefined);
+    const connection = await detectConnection(resolved, get);
+    expect(connection.server).toBe("llama.cpp");
+    expect(connection.slots).toBe(3);
+  });
+
+  it("answersAtOnce { server: 'llama.cpp', slots: 2 } gives 2; { server: 'llama.cpp' } with no slots gives 1; { server: 'llama.cpp', slots: 16 } gives MOST_AT_ONCE (4)", () => {
+    expect(answersAtOnce({ server: "llama.cpp", slots: 2 })).toBe(2);
+    expect(answersAtOnce({ server: "llama.cpp" })).toBe(1);
+    expect(answersAtOnce({ server: "llama.cpp", slots: 16 })).toBe(MOST_AT_ONCE);
+  });
+
+  it("answersAtOnce { server: 'Ollama' } and { server: 'LM Studio' } give 1", () => {
+    expect(answersAtOnce({ server: "Ollama" })).toBe(1);
+    expect(answersAtOnce({ server: "LM Studio" })).toBe(1);
+  });
+
+  it("answersAtOnce { server: 'vLLM' } and {} (an ordinary API, no server) give MOST_AT_ONCE", () => {
+    expect(answersAtOnce({ server: "vLLM" })).toBe(MOST_AT_ONCE);
+    expect(answersAtOnce({})).toBe(MOST_AT_ONCE);
   });
 });

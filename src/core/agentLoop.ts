@@ -31,6 +31,8 @@ export interface TurnEvents {
   onSetAside?(total: number): void;
   /** After each model call whose server said it: the service tier that served it (#295). */
   onServiceTier?(tier: string): void;
+  /** After each model call whose server counted it: the tokens it was sent and gave back (#414). */
+  onSpent?(input: number, output: number): void;
 }
 
 /**
@@ -264,6 +266,21 @@ export interface TurnResult {
   hitStepLimit: boolean;
   /** The history to pass to the next turn. */
   history: ChatMessage[];
+  /**
+   * This answer's tool calls and their results, in order, as they stood when it ended — for a conversation that keeps
+   * them for its next messages (#332). Images are left out of a result: sent again with every message, they would
+   * fill the window.
+   */
+  trail: ChatMessage[];
+  /** Every tool result the last request held, by call id: earlier answers' too, as set aside along the way. */
+  results: Map<string, string>;
+}
+
+/** A tool result as kept between messages: its text, images named rather than sent again (#332). */
+function keptResult(content: string | ContentPart[]): string {
+  if (typeof content === "string") return content;
+  const text = textOf(content);
+  return content.some((part) => part.type === "image_url") ? `${text}\n[Its images are not kept between messages.]` : text;
 }
 
 /** FailureStreak (runner.py): the third consecutive failure of one tool says so. */
@@ -294,9 +311,10 @@ export function declined(toolName: string): string {
          + "it was not done.";
 }
 
-export const REASONING_ONLY_NOTE ="[Agent stopped: the model produced only reasoning content "
-  + "after the last tool call. Try disabling thinking mode (/think) "
-  + "or add --reasoning-budget 1024 to your llama-server startup flags.]";
+// In the interface's words (#402): the plugin has no /think; the switch is the connection's Enable thinking
+export const REASONING_ONLY_NOTE = "[Agent stopped: after its last tool call the model only thought and gave no "
+  + "answer. Try switching off Enable thinking for this connection (Settings → Hiro Agent → Connections), or start "
+  + "llama-server with a reasoning budget (--reasoning-budget 1024).]";
 
 /** The error text Python's ToolNode gives the model for a tool that raised. */
 export function toolErrorText(error: unknown): string {
@@ -361,6 +379,7 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
     );
     lastCompletion = completion;
     if (completion.serviceTier) events.onServiceTier?.(completion.serviceTier);
+    if (completion.usage) events.onSpent?.(completion.usage.promptTokens, completion.usage.completionTokens);
     if (completion.usage?.promptTokens) {
       ratio = Math.min(3, Math.max(0.3, completion.usage.promptTokens / Math.max(1, estimateRequest(messages, schemas))));
     }
@@ -410,8 +429,15 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
   } else {
     reply = finalContent || (lastCompletion?.content.trim() ?? "");
   }
+  // After the system prompt, the history and the question: what this answer called and read. A note asking to wrap
+  // up is the loop's own, not the conversation's
+  const trail = messages.slice(options.history.length + 2).flatMap((message): ChatMessage[] =>
+    message.role === "tool" ? [{ ...message, content: keptResult(message.content) }]
+      : message.role === "assistant" ? [message] : []);
+  const results = new Map<string, string>();
+  for (const message of messages) if (message.role === "tool") results.set(message.tool_call_id, keptResult(message.content));
   return {
-    reply, toolCalls, hitStepLimit,
+    reply, toolCalls, hitStepLimit, trail, results,
     history: [...options.history, { role: "user", content: options.prompt }, { role: "assistant", content: reply }],
   };
 }
@@ -457,7 +483,8 @@ async function callTool(byName: Map<string, Tool>, call: ToolCallRequest, events
       // name the tool does not take is an error here too, not dropped (#163)
       tool.validate?.(args);
       args = declaredArgs(tool, args);
-      if (!confirm) return `Error: '${tool.name}' requires user confirmation, but no interactive terminal is available.`;
+      // Where no one can be asked — a request from the command line without allow=destructive (#402)
+      if (!confirm) return `Error: '${tool.name}' needs the user's confirmation, and there is no one to ask here.`;
       // Best effort, and only for display: a resolver that fails shows the arguments as they came (runner.py)
       const asked = args;
       const shownArgs = await (tool.confirmArgs?.(asked) ?? Promise.resolve(confirmArgs(asked))).catch(() => asked);
