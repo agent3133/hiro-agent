@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
 import { programEnv } from "../core/programPath";
 import { parseWhisperJson, TranscriptionError, type Media, type Transcript } from "../core/recordings";
@@ -57,7 +57,9 @@ function run(program: string, args: string[], timeoutMs: number): Promise<Run> {
 export function ffprobeFor(ffmpeg: string): string {
   const configured = ffmpeg.trim() || "ffmpeg";
   if (!/[\\/]/.test(configured)) return "ffprobe";
-  return join(dirname(configured), basename(configured).replace(/ffmpeg/i, "ffprobe"));
+  // Only the last part of the path, split at either separator: a Windows path is one on any system, and a folder
+  // named ffmpeg stays as it is (#426)
+  return configured.replace(/[^\\/]*$/, (name) => name.replace(/ffmpeg/i, "ffprobe"));
 }
 
 /**

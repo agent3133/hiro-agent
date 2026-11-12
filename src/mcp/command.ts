@@ -7,7 +7,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, posix, win32 } from "node:path";
 
 import { programPath } from "../core/programPath";
 import { McpConfigError } from "./servers";
@@ -34,9 +34,11 @@ function isFile(path: string): boolean {
 /** Whether *path* is *folder* or inside it; case-insensitive on Windows. */
 export function isInside(path: string, folder: string, platform: string): boolean {
   if (!folder) return false;
+  // The platform's own path rules, not this system's: a Windows path is judged as one on any system (#426)
+  const paths = platform === "win32" ? win32 : posix;
   const fold = (text: string): string => (platform === "win32" ? text.toLowerCase() : text);
-  const between = relative(fold(resolve(folder)), fold(resolve(path)));
-  return between === "" || (!between.startsWith("..") && !isAbsolute(between));
+  const between = paths.relative(fold(paths.resolve(folder)), fold(paths.resolve(path)));
+  return between === "" || (!between.startsWith("..") && !paths.isAbsolute(between));
 }
 
 /** The names *command* may have on disk: on Windows with each executable extension, unless it has one already. */

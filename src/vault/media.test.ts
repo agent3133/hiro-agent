@@ -30,7 +30,11 @@ describe("ffprobeFor", () => {
   });
 
   it("gives the ffprobe beside a POSIX ffmpeg path", () => {
-    expect(ffprobeFor("/usr/local/bin/ffmpeg")).toBe(join("/usr/local/bin", "ffprobe"));
+    expect(ffprobeFor("/usr/local/bin/ffmpeg")).toBe("/usr/local/bin/ffprobe");
+  });
+
+  it("keeps a folder named ffmpeg and changes only the program's name (#426)", () => {
+    expect(ffprobeFor("/opt/ffmpeg/bin/ffmpeg")).toBe("/opt/ffmpeg/bin/ffprobe");
   });
 
   it("gives plain ffprobe for a bare ffmpeg, to be found on PATH", () => {
